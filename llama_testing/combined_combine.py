@@ -1,6 +1,6 @@
-
 import torch
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+import pandas as pd
 
 pipe = pipeline("text-generation", model="TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.bfloat16, device_map="auto")
 
@@ -23,6 +23,17 @@ prompt = """Compute
 \[\sum_{n = 1}^\infty \frac{F_{n + 1}}{F_n F_{n + 2}},\]where $F_n$ denotes the $n$th Fibonacci number, so $F_0 = 0$ and $F_1 = 1.$"""
 
 
+math_df = pd.read_json("data/train.jsonl", lines=True)
+
+print(math_df)
+
+prompt = math_df["question"].iloc[0]
+math_answer = math_df["answer"].iloc[0]
+
+print(f"math_question: {prompt}")
+print(f"math_answer: {math_answer}")
+
+
 
 
 # We use the tokenizer's chat template to format each message - see https://huggingface.co/docs/transformers/main/en/chat_templating
@@ -33,7 +44,26 @@ messages = [
     },
     {"role": "user", "content": "Hello!"},
 ]
-prompt = pipe.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+
+messages = []
+
+# for i in range(math_df.shape[0]):
+for i in range(3):
+    messages.append({
+        "role": "system",
+        "content": math_df["question"].iloc[i],
+    })
+
+
+prompt = pipe.tokenizer.apply_chat_template(
+    messages, 
+    tokenize=False, 
+    add_generation_prompt=True
+    )
+
+
+
 outputs = pipe(prompt, max_new_tokens=256, do_sample=True, temperature=0.7, top_k=50, top_p=0.95)
 
 resp_1 = outputs[0]["generated_text"]
@@ -59,10 +89,25 @@ input_ids = tokenizer.encode(
 ).to(model.device)
 
 outputs = model(input_ids=input_ids)
+
+print("outputs.shape")
+
+print("outputs[0][0]")
 print(outputs[0][0])
 
+print("outputs[0]")
+print(outputs[0])
+
+print("outputs[0][1]")
+print(outputs[0][1])
 
 
+print("outputs[1][0]")
+print(outputs[1][0])
 
 
+print("outputs")
+print(outputs)
 
+
+#print(outputs[0][0])
