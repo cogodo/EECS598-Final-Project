@@ -46,61 +46,33 @@ class TinyLlama:
         dataset = pd.read_json(self.train_dataset_path , lines=True)
         val_dataset = pd.read_json(self.test_dataset_path , lines=True)
 
-        dataset_format = []
-        val_dataset_format = []
 
-
-        dataset_format = (
+        dataset_question = (
             dataset["question"]
             .apply(lambda q: {"role": "system", "content": q})
             .to_list()
         )
 
-        val_dataset_format = (
+        val_dataset_question = (
             val_dataset["question"]
             .apply(lambda q: {"role": "system", "content": q})
             .to_list()
         )
 
-        # for i in range(val_dataset.shape[0]):
-        #     val_dataset_format.append({
-        #         "role": "system",
-        #         "content": val_dataset["question"].iloc[i],
-        #     })
+        dataset_answer = (
+            dataset["answer"]
+            .apply(lambda q: {"role": "system", "content": q})
+            .to_list()
+        )
 
-        return dataset_format, val_dataset_format
+        val_dataset_answer = (
+            val_dataset["answer"]
+            .apply(lambda q: {"role": "system", "content": q})
+            .to_list()
+        )
 
-        # not needed
-        # def format_example(text):
-        #     return f"Summarize this review:\n{text}"
+        return dataset_question, val_dataset_question, dataset_answer, val_dataset_answer
 
-        # def tokenize_function(examples):
-        #     texts = [format_example(t) for t in examples["text"]]
-        #     tokens = self.tokenizer(
-        #         texts,
-        #         truncation=True,
-        #         padding="max_length",
-        #         max_length=256
-        #     )
-        #     tokens["labels"] = tokens["input_ids"].copy()
-        #     return tokens
-
-        # print("Tokenizing datasets...")
-        # tokenized_train = dataset.map(
-        #     tokenize_function, 
-        #     batched=True, 
-        #     remove_columns=dataset.column_names,
-        #     desc="Tokenizing train data"
-        # )
-        # tokenized_val = val_dataset.map(
-        #     tokenize_function, 
-        #     batched=True, 
-        #     remove_columns=val_dataset.column_names,
-        #     desc="Tokenizing validation data"
-        # )
-        # print("Tokenization complete!")
-        
-        # return tokenized_train, tokenized_val
 
     def setup_trainer(self, train_data, val_data):
         print("Setting up trainer...")
@@ -158,4 +130,4 @@ if __name__ == "__main__":
 
     model = TinyLlama()
 
-    dataset_format, val_dataset_format = model.prep_data()
+    dataset_question, val_dataset_question, dataset_answer, val_dataset_answer = model.prep_data()
