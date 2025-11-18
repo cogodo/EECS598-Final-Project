@@ -1,6 +1,11 @@
+
+# pipe = pipeline("text-generation", model="TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.bfloat16, device_map="auto")
 model:
+  task: "text-generation"
   name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-  
+  torch_dtype: torch.bfloat16
+  device_map: "auto"
+
 data:
   dataset: "GMSK8"
   max_length: 512

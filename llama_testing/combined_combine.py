@@ -74,56 +74,61 @@ for i in range(3):
     
     prompts.append(prompt)
 
-print(f"prompts: {prompts}")
+
+print(" ")
+print("prompts")
+print(prompts)
 
 
 outputs = pipe(prompts, max_new_tokens=256, do_sample=True, temperature=0.7, top_k=50, top_p=0.95)
 
-resps = outputs[:][0]
+print(" ")
+print("outputs")
+print(outputs)
 
 
-chats = []
-
-for i in range(len(prompts)):
-
-    chat = [
-        # {"role": "system", "content": "Please reason step by step, and check your final answer within \\boxed{}."},
-        {"role": "user", "content": prompts[i]},
-        {"role": "assistant", "content": outputs[i][0]['generated_text']}
-    ]
-
-    chats.append(chat)
+# resps = outputs[:][0]
 
 
-conversation_strs = []
+# chats = []
+
+# for i in range(len(prompts)):
+
+#     chat = [
+#         # {"role": "system", "content": "Please reason step by step, and check your final answer within \\boxed{}."},
+#         {"role": "user", "content": prompts[i]},
+#         {"role": "assistant", "content": outputs[i][0]['generated_text']}
+#     ]
+
+#     chats.append(chat)
+
+
+# conversation_strs = []
 
 
 
-for i in range(len(chats)):
-    conversation_str = tokenizer.apply_chat_template(
-        chats[i], 
-        tokenize=False, 
-        add_generation_prompt=False
-    )
+# for i in range(len(chats)):
+#     conversation_str = tokenizer.apply_chat_template(
+#         chats[i], 
+#         tokenize=False, 
+#         add_generation_prompt=False
+#     )
 
-    conversation_strs.append(conversation_str)
-
-
-encoded = tokenizer(
-    conversation_strs,
-    padding=True,
-    truncation=True,
-    return_tensors="pt",
-    add_special_tokens=False
-)
-
-input_ids = encoded["input_ids"].to(model.device)
-attention_mask = encoded["attention_mask"].to(model.device)
-
-outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-
-print(f"outputs {outputs}")
+#     conversation_strs.append(conversation_str)
 
 
-for _ in range(resps.shape[0]):
-    print()
+# encoded = tokenizer(
+#     conversation_strs,
+#     padding=True,
+#     truncation=True,
+#     return_tensors="pt",
+#     add_special_tokens=False
+# )
+
+# input_ids = encoded["input_ids"].to(model.device)
+# attention_mask = encoded["attention_mask"].to(model.device)
+
+# outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+# print(f"outputs {outputs}")
+

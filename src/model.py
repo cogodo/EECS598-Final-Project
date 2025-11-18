@@ -5,7 +5,10 @@ from transformers import (
     TrainingArguments,
     Trainer,
 )
-from datasets import load_dataset
+
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+
+# from datasets import load_dataset
 import yaml
 from tqdm import tqdm
 import pandas as pd
@@ -15,77 +18,127 @@ class TinyLlama:
     def __init__(self, config_path="configs/config.yaml"):
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
-        self.model_name = self.config['model']['name']
 
-        # self.dataset_name = self.config['data']['dataset']
+        # needed for loading model
+        self.model_task = self.config["model"]["task"]
+        self.model_name = self.config["model"]["name"]
+        if self.config["model"]["torch_dtype"] == "torch.bfloat16":
+            self.model_dtype = torch.bfloat16
+        else:
+            raise ValueError(f'Add datatype: {self.config["model"]["torch_dtype"]}')
+
+        self.model_device_map = self.config["model"]["device_map"]
+
+        # needed for loading dataset
         self.train_dataset_path = self.config["data"]["train"]["path"]
         self.test_dataset_path = self.config["data"]["test"]["path"]
 
         self.model = None
         self.tokenizer = None
         self.trainer = None
-        
+
+    # loading tinyllama        
     def load_model(self):
         print("Loading model and tokenizer...")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            dtype=torch.bfloat16,
+            dtype=self.model_dtype,
             device_map="auto"
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        print("Model loaded successfully!")
-        
-    # Fill ouy function Josef
-    def prep_data(self):
+
+
+    def load_data(self):
         print("Loading datasets...")
-        # dataset = load_dataset(self.dataset_name, split="train[:1%]")
-        # val_dataset = load_dataset(self.dataset_name, split="test[:1%]")
-        
         dataset = pd.read_json(self.train_dataset_path , lines=True)
         val_dataset = pd.read_json(self.test_dataset_path , lines=True)
 
-
-        dataset_question = (
-            dataset["question"]
-            .apply(lambda q: {"role": "system", "content": q})
-            .to_list()
+        dataset_question = self.tokenizer.apply_chat_template(
+            [
+                [{"role": "system", "content": q}]
+                for q in dataset["question"]
+            ],
+            tokenize=False,
+            add_generation_prompt=True
         )
 
-        val_dataset_question = (
-            val_dataset["question"]
-            .apply(lambda q: {"role": "system", "content": q})
-            .to_list()
+
+        dataset_answer = self.tokenizer.apply_chat_template(
+            [
+                [{"role": "system", "content": a}]
+                for a in dataset["answer"]
+            ],
+            tokenize=False,
+            add_generation_prompt=True
         )
 
-        dataset_answer = (
-            dataset["answer"]
-            .apply(lambda q: {"role": "system", "content": q})
-            .to_list()
+
+        val_dataset_question = self.tokenizer.apply_chat_template(
+            [
+                [{"role": "system", "content": q}]
+                for q in val_dataset["question"]
+            ],
+            tokenize=False,
+            add_generation_prompt=True
         )
 
-        val_dataset_answer = (
-            val_dataset["answer"]
-            .apply(lambda q: {"role": "system", "content": q})
-            .to_list()
+        val_dataset_answer = self.tokenizer.apply_chat_template(
+            [
+                [{"role": "system", "content": a}]
+                for a in val_dataset["answer"]
+            ],
+            tokenize=False,
+            add_generation_prompt=True
         )
+
+        # validation dataset answer
+        val_dataset_answer = [
+            self.tokenizer.apply_chat_template(
+                [{"role": "system", "content": a}],
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            for a in val_dataset["answer"]
+        ]
+
+        print("Datasets Loaded")
 
         return dataset_question, val_dataset_question, dataset_answer, val_dataset_answer
 
+    def inference(self, dataset_question):
 
-    def setup_trainer(self, train_data, val_data):
-        print("Setting up trainer...")
-        training_args = TrainingArguments(**self.config['training'])
+        print("Asking Quesiton")
 
-        self.trainer = Trainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=train_data,
-            eval_dataset=val_data,
-            tokenizer=self.tokenizer,
+        # Tokenize the list of input prompts
+        encodings = self.tokenizer(
+            dataset_question,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        ).to(self.model.device)
+
+        # Use .generate()
+        outputs = self.model.generate(
+            **encodings,
+            max_new_tokens=256,
+            do_sample=True,
+            temperature=0.7,
+            top_k=50,
+            top_p=0.95,
+            return_dict_in_generate=False  # <-- faster
         )
-        print("Trainer ready!")
+
+        # Decode each output
+        decoded = self.tokenizer.batch_decode(
+            outputs,
+            skip_special_tokens=True
+        )
+
+        print("Answer Quesiton")
+
+        return decoded
+
 
     def train(self):
         print("Starting training...")
@@ -95,7 +148,6 @@ class TinyLlama:
 
     def generate(self, prompt, max_new_tokens=256, use_chat_template=True):
         """Generate text from a prompt.
-        
         Args:
             prompt: Input text or list of messages for chat template
             max_new_tokens: Maximum tokens to generate
@@ -130,4 +182,13 @@ if __name__ == "__main__":
 
     model = TinyLlama()
 
-    dataset_question, val_dataset_question, dataset_answer, val_dataset_answer = model.prep_data()
+    model.load_model()
+
+    dataset_question, val_dataset_question, dataset_answer, val_dataset_answer = model.load_data()
+
+    dataset_question_1 = dataset_question[0:20]
+
+    answer = model.inference(dataset_question_1)
+
+    print("answer")
+    print(answer)
