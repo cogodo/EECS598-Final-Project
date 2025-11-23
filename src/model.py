@@ -36,8 +36,10 @@ class TinyLlama:
         self.model = None
         self.tokenizer = None
         self.trainer = None
+    
+    def __call__(self, prompt):
+        return self.generate(prompt)
 
-    # loading tinyllama        
     def load_model(self):
         print("Loading model and tokenizer...")
 
@@ -192,3 +194,23 @@ if __name__ == "__main__":
 
     print("answer")
     print(answer)
+    def get_log_prob(self, prompt, response):
+
+        prompt_tokens = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        prompt_len = prompt_tokens.input_ids.shape[1]
+
+        full_text = prompt + response
+        full_tokens = self.tokenizer(full_text, return_tensors="pt").to(self.model.device)
+        outputs = self.model(**full_tokens)
+        logits = outputs.logits
+
+        log_probs = torch.log_softmax(logits, dim=-1)
+
+        token_ids = full_tokens.input_ids[0]
+
+        token_log_probs = log_probs[0, :-1, :].gather(1, token_ids[1:].unsqueeze(-1)).squeeze(-1)
+
+        response_log_probs = token_log_probs[prompt_len - 1:]
+        total = response_log_probs.sum()
+
+        return total

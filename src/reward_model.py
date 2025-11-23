@@ -5,7 +5,7 @@ class AceRewardModel():
     def __init__(self):
         self.model_name = "nvidia/AceMath-7B-RM"
         self.device = "cpu"
-
+    
         self.model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name, 
             device_map=self.device, 
@@ -16,6 +16,9 @@ class AceRewardModel():
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
 
+    def __call__(self, prompt, resp):
+        return self.compute_reward(prompt, resp)
+    
     def compute_reward(self, prompt, resp):
         
         chat = [
