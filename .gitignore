@@ -62,4 +62,3 @@ runs/
 .cache/
 *.pkl
 *.pickle
-tiny-grpo/
