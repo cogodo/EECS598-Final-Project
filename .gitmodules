@@ -1,0 +1,3 @@
+[submodule "tiny-grpo2"]
+	path = tiny-grpo2
+	url = https://github.com/open-thought/tiny-grpo
