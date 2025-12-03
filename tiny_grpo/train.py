@@ -4,6 +4,7 @@ from pathlib import Path
 import random
 import re
 import sys
+import time
 from typing import Any, Iterator, Optional
 import wandb
 import torch
@@ -11,6 +12,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+from torch.profiler import profile, ProfilerActivity, record_function
 from transformers import (
     AutoTokenizer,
     PreTrainedTokenizer,
@@ -228,9 +230,22 @@ def main():
     top_p = 1.0
     temperature = 0.8
 
+    # Profiling configuration
+    enable_profiling = True
+    profile_output_dir = Path("./profiling_results")
+    profile_output_dir.mkdir(exist_ok=True)
+
     device = torch.device("cuda", device_index)
     cpu_device = torch.device("cpu")
     init_rng(seed)
+
+    # Profiling timers
+    profiling_stats = {
+        "rollout_time": [],
+        "experience_creation_time": [],
+        "training_time": [],
+        "total_step_time": [],
+    }
 
     print("Loading TinyLlama model...")
     reference_model, _ = load_model(model_name, device_map=device)
@@ -277,33 +292,38 @@ def main():
     min_rm = float('inf')
     max_rm = float('-inf')
     
-    with torch.no_grad():
-        for i, prompt in enumerate(prompts[:min(10, len(prompts))]):
-            q = prompt["question"]
-            a = prompt["answer"]
-            # Generate a single completion for RM calibration
-            chat_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": q},
-            ]
-            chat_prompt = tokenizer.apply_chat_template(
-                chat_messages, tokenize=False, add_generation_prompt=True
-            )
-            model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
-            output = model.generate(**model_inputs, max_length=max_length, temperature=temperature, do_sample=True)
-            completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    #TEMP todo fix later
+    min_rm = -7
+    max_rm = 7
+
+    # with torch.no_grad():
+    #     for i, prompt in enumerate(prompts[:min(10, len(prompts))]):
+    #         q = prompt["question"]
+    #         a = prompt["answer"]
+    #         # Generate a single completion for RM calibration
+    #         chat_messages = [
+    #             {"role": "system", "content": system_prompt},
+    #             {"role": "user", "content": q},
+    #         ]
+    #         chat_prompt = tokenizer.apply_chat_template(
+    #             chat_messages, tokenize=False, add_generation_prompt=True
+    #         )
+    #         model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
+    #         output = model.generate(**model_inputs, max_length=max_length, temperature=temperature, do_sample=True)
+    #         completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             
-            try:
-                rm_outputs = reward_model.compute_reward(q, completion)
-                rm_score = rm_outputs.logits[0][0].item()
-                min_rm = min(min_rm, rm_score)
-                max_rm = max(max_rm, rm_score)
-            except Exception as e:
-                print(f"Warning during warmup: {e}")
+    #         try:
+    #             rm_outputs = reward_model.compute_reward(q, completion)
+    #             rm_score = rm_outputs.logits[0][0].item()
+    #             min_rm = min(min_rm, rm_score)
+    #             max_rm = max(max_rm, rm_score)
+    #         except Exception as e:
+    #             print(f"Warning during warmup: {e}")
     
     print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
 
     for k, prompt_batch in enumerate(prompt_loader):
+        step_start_time = time.time()
         rollout_returns = []
 
         replay_buffer.clear()
@@ -313,59 +333,71 @@ def main():
 
         with torch.no_grad():
             for q, a in zip(questions, answers):
-                sequence_ids, returns, action_mask, completions = rollout(
-                    model,
-                    tokenizer,
-                    q,
-                    a,
-                    num_rollouts=group_size,
-                    reward_model=reward_model,
-                    math_verifier=math_verifier,
-                    min_rm=min_rm,
-                    max_rm=max_rm,
-                    alpha=alpha,
-                    beta=beta,
-                    eps=eps,
-                    max_length=max_length,
-                    temperature=temperature,
-                    top_p=top_p,
-                )
+                rollout_start = time.time()
+
+                with record_function("rollout"):
+                    sequence_ids, returns, action_mask, completions = rollout(
+                        model,
+                        tokenizer,
+                        q,
+                        a,
+                        num_rollouts=group_size,
+                        reward_model=reward_model,
+                        math_verifier=math_verifier,
+                        min_rm=min_rm,
+                        max_rm=max_rm,
+                        alpha=alpha,
+                        beta=beta,
+                        eps=eps,
+                        max_length=max_length,
+                        temperature=temperature,
+                        top_p=top_p,
+                    )
+
+                rollout_time = time.time() - rollout_start
+                profiling_stats["rollout_time"].append(rollout_time)
 
                 print(
-                    f"rollout q='{q}', a='{a}', returns={returns.sum().item():.2f}, replay_buffer_size={len(replay_buffer)}, sequence_ids={sequence_ids.shape}"
+                    f"rollout q='{q}', a='{a}', returns={returns.sum().item():.2f}, rollout_time={rollout_time:.3f}s, replay_buffer_size={len(replay_buffer)}, sequence_ids={sequence_ids.shape}"
                 )
                 rollout_returns.append(returns.cpu())
 
-                advantages = group_advantages(returns)
-                attention_mask = sequence_ids != pad_token_id
+                exp_start = time.time()
 
-                log_probs = sequences_log_probs(
-                    model=model,
-                    sequence_ids=sequence_ids,
-                    attention_mask=attention_mask,
-                )
-                log_probs_ref = sequences_log_probs(
-                    model=reference_model,
-                    sequence_ids=sequence_ids,
-                    attention_mask=attention_mask,
-                )
-                kl = approx_kl_divergence(
-                    log_probs=log_probs,
-                    log_probs_ref=log_probs_ref,
-                    action_mask=action_mask,
-                )
+                with record_function("experience_creation"):
+                    advantages = group_advantages(returns)
+                    attention_mask = sequence_ids != pad_token_id
 
-                experience = Experience(
-                    sequences=sequence_ids,
-                    action_log_probs=log_probs,
-                    log_probs_ref=log_probs_ref,
-                    returns=returns,
-                    advantages=advantages,
-                    attention_mask=attention_mask,
-                    action_mask=action_mask,
-                    kl=kl,
-                )
-                replay_buffer.append(experience.to(cpu_device))
+                    log_probs = sequences_log_probs(
+                        model=model,
+                        sequence_ids=sequence_ids,
+                        attention_mask=attention_mask,
+                    )
+                    log_probs_ref = sequences_log_probs(
+                        model=reference_model,
+                        sequence_ids=sequence_ids,
+                        attention_mask=attention_mask,
+                    )
+                    kl = approx_kl_divergence(
+                        log_probs=log_probs,
+                        log_probs_ref=log_probs_ref,
+                        action_mask=action_mask,
+                    )
+
+                    experience = Experience(
+                        sequences=sequence_ids,
+                        action_log_probs=log_probs,
+                        log_probs_ref=log_probs_ref,
+                        returns=returns,
+                        advantages=advantages,
+                        attention_mask=attention_mask,
+                        action_mask=action_mask,
+                        kl=kl,
+                    )
+                    replay_buffer.append(experience.to(cpu_device))
+
+                exp_time = time.time() - exp_start
+                profiling_stats["experience_creation_time"].append(exp_time)
 
         torch.cuda.empty_cache()
         episode_return_sum = torch.stack(rollout_returns).sum()
@@ -380,6 +412,19 @@ def main():
             collate_fn=join_experience_batch,
         )
 
+        training_start = time.time()
+
+        # Enable PyTorch profiler for detailed analysis (optional, can be resource intensive)
+        profiler_context = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) if enable_profiling and k == 0 else None
+
+        if profiler_context:
+            profiler_context.__enter__()
+
         for step_epoch in range(epochs_per_step):
             model.train()
 
@@ -390,23 +435,60 @@ def main():
 
                 optimizer.zero_grad()
 
-                log_probs = sequences_log_probs(
-                    model, sequence_ids=exp.sequences, attention_mask=exp.attention_mask
-                )
+                with record_function("forward_pass"):
+                    log_probs = sequences_log_probs(
+                        model, sequence_ids=exp.sequences, attention_mask=exp.attention_mask
+                    )
 
-                loss, kl = objective(log_probs=log_probs, experience=exp)
+                with record_function("loss_computation"):
+                    loss, kl = objective(log_probs=log_probs, experience=exp)
 
                 if not loss.isfinite():
                     print(f"Loss not finite, skipping backward, loss={loss}")
                     print(f"experience.advantages={experience.advantages}")
                     continue
 
-                loss.backward()
-                grad_norm = clip_grad_norm_(model.parameters(), max_norm=max_norm)
+                with record_function("backward_pass"):
+                    loss.backward()
+                    grad_norm = clip_grad_norm_(model.parameters(), max_norm=max_norm)
+
                 print(f"{step_epoch}: kl={kl: .4f}, grad_norm={grad_norm: .4f}")
                 wandb.log({"kl": kl, "grad_norm": grad_norm})
 
-                optimizer.step()
+                with record_function("optimizer_step"):
+                    optimizer.step()
+
+        if profiler_context:
+            profiler_context.__exit__(None, None, None)
+            # Save profiler trace
+            trace_path = profile_output_dir / f"trace_step_{k}.json"
+            profiler_context.export_chrome_trace(str(trace_path))
+            print(f"Profiler trace saved to {trace_path}")
+
+            # Print summary
+            print("\n=== Profiling Summary ===")
+            print(profiler_context.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+            print("========================\n")
+
+        training_time = time.time() - training_start
+        profiling_stats["training_time"].append(training_time)
+
+        total_step_time = time.time() - step_start_time
+        profiling_stats["total_step_time"].append(total_step_time)
+
+        # Log timing stats
+        print(f"\n=== Step {k} Timing ===")
+        print(f"Total step time: {total_step_time:.3f}s")
+        print(f"Avg rollout time: {sum(profiling_stats['rollout_time'][-len(questions):]) / len(questions):.3f}s")
+        print(f"Avg experience creation time: {sum(profiling_stats['experience_creation_time'][-len(questions):]) / len(questions):.3f}s")
+        print(f"Training time: {training_time:.3f}s")
+        print("=====================\n")
+
+        wandb.log({
+            "step_time": total_step_time,
+            "avg_rollout_time": sum(profiling_stats['rollout_time'][-len(questions):]) / len(questions),
+            "training_time": training_time,
+        })
 
         if (
             checkpoint_path is not None
@@ -417,6 +499,15 @@ def main():
 
     if checkpoint_path is not None:
         model.save_pretrained(checkpoint_path / f"step_{k}")
+
+    # Save final profiling statistics
+    print("\n=== Final Profiling Statistics ===")
+    print(f"Total rollouts: {len(profiling_stats['rollout_time'])}")
+    print(f"Avg rollout time: {sum(profiling_stats['rollout_time']) / len(profiling_stats['rollout_time']):.3f}s")
+    print(f"Avg experience creation time: {sum(profiling_stats['experience_creation_time']) / len(profiling_stats['experience_creation_time']):.3f}s")
+    print(f"Avg training time per step: {sum(profiling_stats['training_time']) / len(profiling_stats['training_time']):.3f}s")
+    print(f"Avg total step time: {sum(profiling_stats['total_step_time']) / len(profiling_stats['total_step_time']):.3f}s")
+    print("==================================\n")
 
 
 if __name__ == "__main__":
