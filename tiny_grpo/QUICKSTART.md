@@ -32,7 +32,11 @@ This will verify:
 
 ### 3. Run Training
 ```bash
+# Run with default sigmoid-based reward scorer
 python train.py
+
+# Or run with tanh-based reward scorer
+python train.py --reward-scorer tanh
 ```
 
 ## What to Expect
@@ -68,6 +72,22 @@ returns of step 0: 51.2000
 ```
 
 ## Configuration
+
+### Command Line Arguments
+
+```bash
+python train.py --reward-scorer {sigmoid|tanh}
+```
+
+**Reward Scorer Options:**
+- `sigmoid` (default): Uses sigmoid-based difficulty weighting (original `get_final_reward`)
+- `tanh`: Uses tanh-based difficulty weighting (experimental `get_our_final_reward`)
+
+The reward scorer controls how the final reward is computed based on difficulty estimates:
+- **Sigmoid scorer**: `w = w_min + (w_max - w_min) / (1 + exp(-k*(σ_u - σ_bar)))`
+- **Tanh scorer**: `w = w_min + (w_max - w_min) * tanh(r_hat³)`
+
+### Code Configuration
 
 Edit `main()` in `train.py` to customize:
 

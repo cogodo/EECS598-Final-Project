@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from typing import Any, Iterator, Optional
+import argparse
 import wandb
 import torch
 import torch.optim as optim
@@ -19,6 +20,7 @@ from transformers import (
     AutoModelForCausalLM,
     GenerationConfig,
 )
+from peft import LoraConfig, get_peft_model
 import numpy as np
 from loss import approx_kl_divergence, GRPOLoss
 from replay_buffer import ReplayBuffer, Experience, join_experience_batch
@@ -27,7 +29,7 @@ from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
-from utils import combine_hybrid_score, get_final_reward
+from utils import combine_hybrid_score, get_final_reward, get_our_final_reward
 
 
 def load_model(
@@ -35,6 +37,8 @@ def load_model(
     trust_remote_code: bool = False,
     bf16: bool = True,
     device_map=None,
+    use_lora: bool = False,
+    lora_config: Optional[LoraConfig] = None,
 ) -> tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
@@ -44,6 +48,15 @@ def load_model(
         torch_dtype=torch.bfloat16 if bf16 else "auto",
         device_map=device_map,
     )
+    
+    # Apply LoRA if requested
+    if use_lora:
+        if lora_config is None:
+            raise ValueError("lora_config must be provided when use_lora=True")
+        print(f"Applying LoRA with config: r={lora_config.r}, alpha={lora_config.lora_alpha}")
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+    
     return model, tokenizer
 
 
@@ -68,6 +81,7 @@ def rollout(
     max_length: int = 1024,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    reward_fn: Callable = get_final_reward,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str]]:
 
     model.eval()
@@ -148,7 +162,7 @@ def rollout(
             verl_score, rm_score, min_rm, max_rm, eps, alpha, beta
         )
 
-        final_reward = get_final_reward(hybrid_reward, np.mean(past_reward_model_std), past_reward_model_std[-1])
+        final_reward = reward_fn(hybrid_reward, np.mean(past_reward_model_std), past_reward_model_std[-1])
 
 
         # returns[i] = hybrid_reward
@@ -217,6 +231,21 @@ def read_prompts(
 
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Tiny GRPO Training with configurable reward scorer')
+    parser.add_argument('--reward-scorer', type=str, default='sigmoid', 
+                        choices=['sigmoid', 'tanh'],
+                        help='Reward scorer to use: sigmoid (default) or tanh')
+    args = parser.parse_args()
+    
+    # Select reward function based on flag
+    if args.reward_scorer == 'tanh':
+        reward_fn = get_our_final_reward
+        print("Using tanh-based reward scorer")
+    else:
+        reward_fn = get_final_reward
+        print("Using sigmoid-based reward scorer")
+    
     seed = 42
     wandb_project = None  # "tiny_grpo"
     device_index = 0
@@ -242,6 +271,13 @@ def main():
     max_length = 512
     top_p = 1.0
     temperature = 0.8
+    
+    # LoRA configuration
+    use_lora = True
+    lora_r = 16
+    lora_alpha = 32
+    lora_dropout = 0.05
+    lora_target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]
 
     # Profiling configuration
     enable_profiling = True
@@ -261,8 +297,38 @@ def main():
     }
 
     print("Loading TinyLlama model...")
+    # Load reference model (no LoRA - frozen)
     reference_model, _ = load_model(model_name, device_map=device)
-    model, tokenizer = load_model(model_name, device_map=device)
+    
+    # Create LoRA config for policy model
+    lora_config = None
+    if use_lora:
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+    
+    # Load policy model with LoRA
+    model, tokenizer = load_model(
+        model_name, 
+        device_map=device, 
+        use_lora=use_lora, 
+        lora_config=lora_config
+    )
+    
+    # Verify trainable parameters
+    if use_lora:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"\nLoRA enabled:")
+        print(f"  Trainable params: {trainable_params:,}")
+        print(f"  Total params: {total_params:,}")
+        print(f"  Trainable %: {100 * trainable_params / total_params:.2f}%\n")
+    
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     reference_model.eval()
@@ -298,7 +364,7 @@ def main():
     if wandb_project is None:
         wandb.init(mode="disabled")
     else:
-        wandb.init(project=wandb_project)
+        wandb.init(project=wandb_project, config={"reward_scorer": args.reward_scorer})
 
     # Warmup pass to get RM bounds
     print("Running warmup to determine reward model bounds...")
@@ -365,6 +431,7 @@ def main():
                         max_length=max_length,
                         temperature=temperature,
                         top_p=top_p,
+                        reward_fn=reward_fn,
                     )
 
                 rollout_time = time.time() - rollout_start
