@@ -19,6 +19,7 @@ from transformers import (
     AutoModelForCausalLM,
     GenerationConfig,
 )
+import numpy as np
 from loss import approx_kl_divergence, GRPOLoss
 from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 
@@ -26,7 +27,7 @@ from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
-from utils import combine_hybrid_score
+from utils import combine_hybrid_score, get_final_reward
 
 
 def load_model(
@@ -121,6 +122,10 @@ def rollout(
     action_mask = action_mask[:, 1:]
 
     # 3. determine rewards using hybrid approach
+    # keep track of of old rewards
+    past_reward_model = []
+    past_reward_model_std = []
+
     returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
     for i, completion in enumerate(completions):
         # Get verifier score (binary: correct or not)
@@ -135,12 +140,20 @@ def rollout(
             print(f"Warning: Reward model failed with error: {e}, using default score")
             rm_score = 0.0
         
+        past_reward_model.append(rm_score)
+        past_reward_model_std.append(np.std(past_reward_model))
+
         # Combine scores using hybrid function
         hybrid_reward = combine_hybrid_score(
             verl_score, rm_score, min_rm, max_rm, eps, alpha, beta
         )
-        
-        returns[i] = hybrid_reward
+
+        final_reward = get_final_reward(hybrid_reward, np.mean(past_reward_model_std), past_reward_model_std[-1])
+
+
+        # returns[i] = hybrid_reward
+        returns[i] = final_reward
+
 
     return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
 

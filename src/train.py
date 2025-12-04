@@ -6,8 +6,10 @@ import os
 from model import TinyLlama
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
-from utils import combine_hybrid_score
+from utils import combine_hybrid_score, final_reward
 # import all other shit
+
+import numpy as np
 
 
 class Trainer:
@@ -26,10 +28,27 @@ class Trainer:
         # put responses through RM and verl
         rm_score = self.reward_model(question, response)
         verl_score = self.verl_model(question, response, ground_truth)
+        
+        print(f"rm_score: {rm_score}")
+        
         # put the outputs of these through the math function with alpha, beta
         combined = combine_hybrid_score(verl_score, rm_score, min_rm, max_rm, 
                                         self.config['eps'], self.config['alpha'], self.config['beta'])
-        return combined
+        
+        # # hyperarameters
+        # w_min = -0.5
+        # w_max = 0.5
+        # # set by the paper
+        # k = 5
+
+        # print(f"sigma_bar")
+
+
+
+        # # put the outputs of these through the math function with alpha, beta
+        # combined_reward = final_reward(rm_score, sigma_bar, sigma_u, w_min, w_max, k)
+
+        return combined, rm_score
 
     def compute_advantages(self, rewards):
         mean_reward = sum(rewards) / len(rewards)
@@ -67,18 +86,36 @@ class Trainer:
                     max_rm = rm_score
                 if rm_score < min_rm:
                     min_rm = rm_score
-                    
+
+
         for epoch in range(start_epoch, num_epochs):
             self.base_model.train()
             # go through all data
+
+            past_reward_model = []
+            past_reward_model_std = []
+
             for question, ground_truth in train_data:
                 # get responses
                 with torch.no_grad():
                     responses = [self.base_model.generate(question) for _ in range(K)]
                     # Also compute rewards here — they don't need gradients
-                    rewards = [self.compute_reward(question, resp, ground_truth, min_rm, max_rm) for resp in responses]
+                    # rewards = [self.compute_reward(question, resp, ground_truth, min_rm, max_rm) for resp in responses]
+                    reward_hats, rm_scores =  [self.compute_reward(question, resp, ground_truth, min_rm, max_rm) for resp in responses]
+
+                    past_reward_model.append(rm_scores)
+                    past_reward_model_std.append(np.std(past_reward_model))
+
+                    # these are hyperparameters
+                    k= 5
+                    w_min = 0.5
+                    w_max = 2.0
+
+                    r_final = final_reward(reward_hats, np.mean(past_reward_model_std), past_reward_model_std[-1], w_min, w_max, k)
+
+
                     # compute advantages TODO update to variance-aware weighting
-                    advantages = self.compute_advantages(rewards)
+                    advantages = self.compute_advantages(r_final)
                 
                 optimizer.zero_grad()
                 # calc loss + backprop
@@ -95,9 +132,27 @@ class Trainer:
                 self.base_model.eval()
                 with torch.no_grad():
                     total_reward = 0
+
+                    past_reward_model = []
+                    past_reward_model_std = []
+
                     for question, answer in val_data:
                         response = self.base_model.generate(question)
-                        reward = self.compute_reward(question, response, answer, min_rm, max_rm)
+
+                        reward_hats, rm_scores =  [self.compute_reward(question, resp, ground_truth, min_rm, max_rm) for resp in responses]
+
+                        past_reward_model.append(rm_scores)
+                        past_reward_model_std.append(np.std(past_reward_model))
+
+                        # these are hyperparameters
+                        w_min = -0.5
+                        w_max = 0.5
+                        # k = 5 in the paper
+                        k= 5
+
+                        r_final = final_reward(reward_hats, np.mean(past_reward_model_std), past_reward_model_std[-1], w_min, w_max, k)
+
+
                         total_reward += reward
                     avg_reward = total_reward / len(val_data)
 
