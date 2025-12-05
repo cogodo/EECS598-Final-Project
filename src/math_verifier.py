@@ -19,7 +19,8 @@ class MathVerifier:
         self.method = method
         self.correct_reward = correct_reward
         self.format_reward = format_reward
-    
+        
+    def __call__(self, prompt, response, ground_truth):
         return self.verify(prompt, response, ground_truth)
     
     def verify(self, prompt, response, ground_truth):
