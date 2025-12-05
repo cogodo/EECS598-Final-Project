@@ -48,7 +48,7 @@ def load_model(
     if use_lora:
         if lora_config is None:
             raise ValueError("lora_config must be provided when use_lora=True")
-        print(f"Applying LoRA: r={lora_config.r}, alpha={lora_config.lora_alpha}")
+        print(f"✓ Applying LoRA: r={lora_config.r}, alpha={lora_config.lora_alpha}")
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
@@ -194,13 +194,12 @@ def main():
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
         "enable_profiling": True,
-        # LoRA settings
+        # LoRA settings (saves ~20MB adapters instead of 2GB full models!)
         "use_lora": True,
         "lora_r": 16,
         "lora_alpha": 32,
         "lora_dropout": 0.05,
-        "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
-        "max_length": 512
+        "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"]
     }
     
     init_rng(config["seed"])
@@ -213,7 +212,7 @@ def main():
     ref_model, _ = load_model(config["model_name"], device_map=device)
     ref_model.eval()
 
-    # Policy model: with LoRA if enabled
+    # Policy model: with LoRA
     lora_config = None
     if config["use_lora"]:
         lora_config = LoraConfig(
@@ -253,13 +252,11 @@ def main():
     min_rm = -7
     max_rm = 7
 
+    max_length = 512
     temperature = 1.0
 
-
-    max_length = 512
-
     with torch.no_grad():
-        for i, prompt in enumerate(prompts[:min(10, len(prompts))]):
+        for prompt in prompts[:min(10, len(prompts))]:
             q = prompt["question"]
             a = prompt["answer"]
             # Generate a single completion for RM calibration
@@ -351,9 +348,8 @@ def main():
         if (k + 1) % 5 == 0:
             checkpoint_dir = config["checkpoint_path"] / f"step_{k}"
             model.save_pretrained(checkpoint_dir)
-            # Also save tokenizer for easy loading
             tokenizer.save_pretrained(checkpoint_dir)
-            print(f"Saved checkpoint to {checkpoint_dir}")
+            print(f"✓ Saved checkpoint to {checkpoint_dir}")
 
 if __name__ == "__main__":
     main()

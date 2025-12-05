@@ -1,0 +1,28 @@
+# Industry Standard: HuggingFace TRL for GRPO Training
+# Source: https://huggingface.co/docs/trl/en/index
+
+# Core dependencies (flexible versions to avoid conflicts)
+torch>=2.0.0
+transformers>=4.40.0
+trl>=0.9.0                    # Official GRPO implementation
+peft>=0.7.0                   # LoRA support
+accelerate>=0.20.0
+
+# Data & utilities
+datasets>=2.14.0
+tqdm>=4.65.0
+
+# Optional: experiment tracking
+wandb>=0.15.0
+
+# Optional: visualization
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Note: TRL's GRPOTrainer handles:
+# - Rollouts
+# - Advantage computation
+# - Policy updates
+# - Memory-efficient training
+# No need to implement GRPO from scratch!
