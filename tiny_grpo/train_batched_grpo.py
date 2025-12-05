@@ -12,6 +12,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.profiler import profile, ProfilerActivity, record_function
 from transformers import AutoTokenizer, PreTrainedTokenizer, AutoModelForCausalLM, GenerationConfig
+from peft import LoraConfig, get_peft_model
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -28,10 +29,12 @@ def load_model(
     trust_remote_code: bool = False,
     bf16: bool = True,
     device_map=None,
+    use_lora: bool = False,
+    lora_config: Optional[LoraConfig] = None,
 ) -> Tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
-    
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
@@ -39,6 +42,15 @@ def load_model(
         device_map=device_map,
     )
     model.config.pad_token_id = tokenizer.eos_token_id
+
+    # Apply LoRA if requested
+    if use_lora:
+        if lora_config is None:
+            raise ValueError("lora_config must be provided when use_lora=True")
+        print(f"Applying LoRA: r={lora_config.r}, alpha={lora_config.lora_alpha}")
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
     return model, tokenizer
 
 def init_rng(seed: int):
@@ -180,7 +192,13 @@ def main():
         "max_norm": 1.0,
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
-        "enable_profiling": True
+        "enable_profiling": True,
+        # LoRA settings
+        "use_lora": True,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"]
     }
     
     init_rng(config["seed"])
@@ -189,16 +207,35 @@ def main():
 
     # --- Load Models ---
     print("Loading Models...")
+    # Reference model: no LoRA (frozen)
     ref_model, _ = load_model(config["model_name"], device_map=device)
-    model, tokenizer = load_model(config["model_name"], device_map=device)
     ref_model.eval()
+
+    # Policy model: with LoRA if enabled
+    lora_config = None
+    if config["use_lora"]:
+        lora_config = LoraConfig(
+            r=config["lora_r"],
+            lora_alpha=config["lora_alpha"],
+            target_modules=config["lora_target_modules"],
+            lora_dropout=config["lora_dropout"],
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+
+    model, tokenizer = load_model(
+        config["model_name"],
+        device_map=device,
+        use_lora=config["use_lora"],
+        lora_config=lora_config
+    )
     
     optimizer = optim.Adam(model.parameters(), lr=config["lr"])
     reward_model = AceRewardModel()
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    prompts = read_prompts("data/dummy_math_tasks.jsonl", predicate=lambda x: len(x["question"]) < 256, max_rows=64)
+    prompts = read_prompts("data/train_gsm8k.jsonl", predicate=lambda x: len(x["question"]) < 256, max_rows=64)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -258,7 +295,11 @@ def main():
 
         # 4. Checkpointing
         if (k + 1) % 5 == 0:
-            model.save_pretrained(config["checkpoint_path"] / f"step_{k}")
+            checkpoint_dir = config["checkpoint_path"] / f"step_{k}"
+            model.save_pretrained(checkpoint_dir)
+            # Also save tokenizer for easy loading
+            tokenizer.save_pretrained(checkpoint_dir)
+            print(f"Saved checkpoint to {checkpoint_dir}")
 
 if __name__ == "__main__":
     main()
