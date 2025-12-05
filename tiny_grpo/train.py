@@ -344,11 +344,23 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # Load prompts - use dummy data for testing
-    prompts = read_prompts(
-        "data/dummy_math_tasks.jsonl",
-        predicate=lambda x: len(x["question"]) < 256,
-        max_rows=64,
-    )
+    # prompts = read_prompts(
+    #     "data/dummy_math_tasks.jsonl",
+    #     predicate=lambda x: len(x["question"]) < 256,
+    #     max_rows=64,
+    # )
+
+    def load_jsonl(path):
+        data = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():        # skip empty lines
+                    data.append(json.loads(line))
+        return data
+
+    prompts = load_jsonl("data/train.jsonl")
+
+
     print(f"found {len(prompts)} matching prompts")
     prompt_loader = DataLoader(
         prompts,
