@@ -21,7 +21,8 @@ from utils import combine_hybrid_score
 from loss import approx_kl_divergence, GRPOLoss
 from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 
-SYSTEM_PROMPT = "You are a helpful math assistant. Solve the given problem step by step and provide your final answer wrapped in <answer> tags, like this: <answer>your answer here</answer>"
+SYSTEM_PROMPT = """You are a helpful math assistant. Please solve the problem step by step, showing your reasoning clearly. 
+Once you have solved the problem, provide your final numerical answer wrapped in <answer> tags, like this: <answer>number</answer>"""
 
 def load_model(
     model_name_or_path: str,
@@ -73,7 +74,7 @@ def rollout(
     alpha: float,
     beta: float,
     eps: float,
-    max_length: int = 128,
+    max_length: int = 512,
     temperature: float = 1.0,
     top_p: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -180,7 +181,8 @@ def main():
         "max_norm": 1.0,
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
-        "enable_profiling": True
+        "enable_profiling": True,
+        "max_length": 512
     }
     
     init_rng(config["seed"])
@@ -198,12 +200,15 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    prompts = read_prompts("data/dummy_math_tasks.jsonl", predicate=lambda x: len(x["question"]) < 256, max_rows=64)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=64)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
+
+    # --- Warmup to determine reward bounds --- #
+    
 
     # --- Training Loop ---
     for k, batch in enumerate(prompt_loader):
@@ -212,8 +217,16 @@ def main():
         
         # 1. Rollout Phase
         for q, a in zip(batch["question"], batch["answer"]):
+
+            # GSM8K parsing. get value after "####" as oracle answer
+            if "####" in a:
+                oracle_answer = a.split("####")[-1].strip()
+            else:
+                oracle_answer = a # Fallback for dummy data
+            
+
             sequence_ids, returns, action_mask, _ = rollout(
-                model, tokenizer, q, a, config["group_size"], reward_model, math_verifier,
+                model, tokenizer, q, oracle_answer, config["group_size"], reward_model, math_verifier,
                 config["min_rm"], config["max_rm"], config["alpha"], config["beta"], config["eps"]
             )
             
