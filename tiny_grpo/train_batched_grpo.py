@@ -208,7 +208,45 @@ def main():
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
 
     # --- Warmup to determine reward bounds --- #
+    print("Running warmup to determine reward model bounds...")
+    min_rm = float('inf')
+    max_rm = float('-inf')
     
+    #TEMP todo fix later
+    min_rm = -7
+    max_rm = 7
+
+    max_length = 512
+
+    with torch.no_grad():
+        for i, prompt in enumerate(prompts[:min(10, len(prompts))]):
+            q = prompt["question"]
+            a = prompt["answer"]
+            # Generate a single completion for RM calibration
+            chat_messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q},
+            ]
+            chat_prompt = tokenizer.apply_chat_template(
+                chat_messages, tokenize=False, add_generation_prompt=True
+            )
+            model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
+            output = model.generate(**model_inputs, max_length=max_length, temperature=temperature, do_sample=True)
+            completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            
+            try:
+                rm_outputs = reward_model.compute_reward(q, completion)
+                rm_score = rm_outputs.logits[0][0].item()
+                min_rm = min(min_rm, rm_score)
+                max_rm = max(max_rm, rm_score)
+            except Exception as e:
+                print(f"Warning during warmup: {e}")
+    
+    print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
+
+    
+
+
 
     # --- Training Loop ---
     for k, batch in enumerate(prompt_loader):
