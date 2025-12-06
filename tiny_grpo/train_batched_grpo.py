@@ -12,6 +12,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.profiler import profile, ProfilerActivity, record_function
 from transformers import AutoTokenizer, PreTrainedTokenizer, AutoModelForCausalLM, GenerationConfig
+from peft import LoraConfig, get_peft_model
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -33,6 +34,8 @@ def load_model(
     trust_remote_code: bool = False,
     bf16: bool = True,
     device_map=None,
+    use_lora: bool = False,
+    lora_config: Optional[LoraConfig] = None,
 ) -> Tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
@@ -44,6 +47,15 @@ def load_model(
         device_map=device_map,
     )
     model.config.pad_token_id = tokenizer.eos_token_id
+    
+    # Apply LoRA if requested
+    if use_lora:
+        if lora_config is None:
+            raise ValueError("lora_config must be provided when use_lora=True")
+        print(f"✓ Applying LoRA: r={lora_config.r}, alpha={lora_config.lora_alpha}")
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+    
     return model, tokenizer
 
 def init_rng(seed: int):
@@ -199,7 +211,13 @@ def main():
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
         "enable_profiling": True,
-        "max_length": 512
+        "max_length": 512,
+        # ---- LoRA Configuration ----
+        "use_lora": True,  # Enable LoRA for parameter-efficient training
+        "lora_r": 16,  # Low-rank dimension
+        "lora_alpha": 32,  # Scaling parameter (typically 2*r)
+        "lora_dropout": 0.05,
+        "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],  # Attention layers to adapt
     }
     
     init_rng(config["seed"])
@@ -208,11 +226,39 @@ def main():
 
     # --- Load Models ---
     print("Loading Models...")
+    # Reference model: NO LoRA (frozen for KL divergence computation)
     ref_model, _ = load_model(config["model_name"], device_map=device)
-    model, tokenizer = load_model(config["model_name"], device_map=device)
     ref_model.eval()
     
-    optimizer = optim.Adam(model.parameters(), lr=config["lr"])
+    # Policy model: WITH LoRA (only these parameters will be trained)
+    lora_config = None
+    if config["use_lora"]:
+        lora_config = LoraConfig(
+            r=config["lora_r"],
+            lora_alpha=config["lora_alpha"],
+            target_modules=config["lora_target_modules"],
+            lora_dropout=config["lora_dropout"],
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+    
+    model, tokenizer = load_model(
+        config["model_name"],
+        device_map=device,
+        use_lora=config["use_lora"],
+        lora_config=lora_config
+    )
+    
+    # Show parameter efficiency when using LoRA
+    if config["use_lora"]:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"\n🎯 LoRA enabled:")
+        print(f"  Trainable params: {trainable_params:,}")
+        print(f"  Total params: {total_params:,}")
+        print(f"  Trainable percentage: {100 * trainable_params / total_params:.2f}%\n")
+    
+    optimizer = optim.Adam(model.parameters(), lr=config["lr"])  # Automatically only trains LoRA parameters
     reward_model = AceRewardModel()
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
