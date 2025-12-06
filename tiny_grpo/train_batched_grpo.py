@@ -445,6 +445,9 @@ def main():
         replay_buffer.append(exp.to("cpu"))
 
 
+        print("LINE 448")
+        print(f"returns: {returns}")
+
         # 3. Optimization Phase
         train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
         
