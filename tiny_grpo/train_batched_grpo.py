@@ -354,6 +354,7 @@ def main():
 
     temperature = 1.0
 
+    
     with torch.no_grad():
         for i, prompt in enumerate(prompts[:min(20, len(prompts))]):
             q = prompt["question"]
@@ -394,6 +395,12 @@ def main():
 
     print("\n ----- BEGIN TRAINING ------ \n")
 
+
+    rewards = torch.zeros(len(prompts))
+    rewards_std = torch.zeros(len(prompts))
+
+    j = 0
+
     # --- Training Loop ---
     for k, batch in enumerate(prompt_loader):
         print(f"\n=== Step {k} ===")
@@ -424,6 +431,9 @@ def main():
             device=device,
         )
 
+        rewards[k] = returns.mean()
+        rewards_std[k] = returns.std()
+
         # 2. Experience Creation (batched)
         with torch.no_grad():
             att_mask = sequence_ids != tokenizer.eos_token_id
@@ -444,9 +454,6 @@ def main():
         replay_buffer.clear()
         replay_buffer.append(exp.to("cpu"))
 
-
-        print("LINE 448")
-        print(f"returns: {returns}")
 
         # 3. Optimization Phase
         train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
@@ -475,10 +482,15 @@ def main():
                 else:
                     print("Skipping non-finite loss")
                     
-        print(f'Step {k} Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
+        print(f'Step {k} Averag Reward: {rewards[k]}, std Reward: {rewards_std[k]}, Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
+
+
         # 4. Checkpointing
         if (k + 1) % 20 == 0:
             model.save_pretrained(config["checkpoint_path"] / f"step_{k}")
+
+
+
 
 if __name__ == "__main__":
     main()
