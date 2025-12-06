@@ -314,7 +314,7 @@ def main():
         "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "checkpoint_path": Path("./output"),
         "train_batch_size": 8,
-        "lr": 5e-6,
+        "lr": 1e-5,
         "group_size": 8,
         "rollouts_per_step": 8,
         "max_norm": 1.0,
@@ -340,7 +340,7 @@ def main():
 
     # --- Data Loading ---
     # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=200)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=4000)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
