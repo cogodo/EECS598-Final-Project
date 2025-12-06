@@ -26,7 +26,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 25
+epochs = 1
 
 def load_model(
     model_name_or_path: str,
@@ -34,15 +34,19 @@ def load_model(
     bf16: bool = True,
     device_map=None,
 ) -> Tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    tokenizer.pad_token = tokenizer.eos_token
     
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"   # ← ADD THIS LINE
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
-        torch_dtype=torch.bfloat16 if bf16 else "auto",
+        dtype=torch.bfloat16 if bf16 else "auto",
         device_map=device_map,
     )
+
     model.config.pad_token_id = tokenizer.eos_token_id
     return model, tokenizer
 
@@ -97,10 +101,18 @@ def rollout(
     attention_mask = model_inputs["attention_mask"].repeat(num_rollouts, 1)
 
     # 2. Generate
+    # gen_config = GenerationConfig(
+    #     do_sample=True, top_p=top_p, temperature=temperature, 
+    #     max_length=max_length, pad_token_id=tokenizer.eos_token_id
+    # )
     gen_config = GenerationConfig(
-        do_sample=True, top_p=top_p, temperature=temperature, 
-        max_length=max_length, pad_token_id=tokenizer.eos_token_id
-    )
+        do_sample=True,
+        top_p=top_p,
+        temperature=temperature,
+        max_new_tokens=max_length,
+        pad_token_id=tokenizer.eos_token_id,
+        )
+
     
     t_gen_start = time.time()
     sequence_ids = model.generate(
@@ -167,6 +179,118 @@ def rollout(
     
     return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
 
+@torch.no_grad()
+def rollout_batch(
+    model,
+    tokenizer,
+    tasks: List[str],
+    oracle_answers: List[str],
+    num_rollouts: int,
+    reward_model: AceRewardModel,
+    math_verifier: MathVerifier,
+    min_rm: float,
+    max_rm: float,
+    alpha: float,
+    beta: float,
+    eps: float,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    device="cuda",
+):
+    """Batched rollout for an entire mini-batch of prompts."""
+
+    B = len(tasks)                         # batch_size (# of questions)
+    K = num_rollouts                       # group_size
+    total = B * K                          # total completions
+
+    # 1. Build chat prompts for all tasks
+    chat_prompts = [
+        tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": task},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for task in tasks
+    ]
+
+    # 2. Tokenize once for the entire batch
+    enc = tokenizer(chat_prompts, return_tensors="pt", padding=True).to(device)
+
+    input_ids = enc["input_ids"]                 # [B, L]
+    attn_mask = enc["attention_mask"]
+
+    # 3. Repeat each question K times → [B*K, L]
+    input_ids = input_ids.repeat_interleave(K, dim=0)
+    attn_mask = attn_mask.repeat_interleave(K, dim=0)
+
+    # 4. Generate all completions in ONE CALL
+    gen_config = GenerationConfig(
+        do_sample=True,
+        top_p=top_p,
+        temperature=temperature,
+        max_new_tokens=max_new_tokens,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+    generated = model.generate(
+        input_ids=input_ids,
+        attention_mask=attn_mask,
+        generation_config=gen_config,
+    )
+
+    # 5. Decode all completions
+    completions = tokenizer.batch_decode(
+        generated[:, input_ids.shape[1]:],
+        skip_special_tokens=True,
+    )
+
+    # 6. Build masks
+    action_mask = torch.zeros_like(generated, dtype=torch.bool)
+    action_mask[:, enc["input_ids"].shape[1]:] = True
+    action_mask[generated == tokenizer.eos_token_id] = False
+    action_mask = action_mask[:, 1:]
+
+    # 7. Compute rewards (still per question)
+    all_returns = []
+    idx = 0
+
+    for task, oracle in zip(tasks, oracle_answers):
+        each_completions = completions[idx: idx + K]
+
+        # reward model
+        rm_scores = reward_model.compute_batch_reward(task, each_completions)
+        rm_scores_t = torch.tensor(rm_scores, dtype=torch.float32, device=device)
+
+        sigma_u = rm_scores_t.std()
+        SIGMA_BAR_LIST.append(sigma_u)
+        sigma_bar = torch.stack(SIGMA_BAR_LIST).mean()
+
+        returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
+
+        for i, comp in enumerate(each_completions):
+            verl_score = math_verifier.verify(task, comp, oracle)["reward"]
+
+            r_hat = combine_hybrid_score(
+                verl_score, rm_scores[i], min_rm, max_rm, eps, alpha, beta
+            )
+
+            hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
+            returns[i] = hybrid
+
+        all_returns.append(returns)
+        idx += K
+
+    # stack into [B*K, 1]
+    all_returns = torch.cat(all_returns, dim=0)
+
+    return generated, all_returns, action_mask, completions
+
+
+
 def group_advantages(returns: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return (returns - returns.mean()) / (returns.std() + eps)
 
@@ -197,7 +321,7 @@ def main():
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
         "enable_profiling": True,
-        "max_length": 512
+        "max_length": 200
     }
     
     init_rng(config["seed"])
@@ -230,8 +354,6 @@ def main():
 
     temperature = 1.0
 
-    max_length = 512
-
     with torch.no_grad():
         for i, prompt in enumerate(prompts[:min(20, len(prompts))]):
             q = prompt["question"]
@@ -245,7 +367,7 @@ def main():
                 chat_messages, tokenize=False, add_generation_prompt=True
             )
             model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
-            output = model.generate(**model_inputs, max_length=max_length, temperature=temperature, do_sample=True)
+            output = model.generate(**model_inputs, max_length=config["max_length"], temperature=temperature, do_sample=True)
             completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             
             try:
@@ -277,38 +399,51 @@ def main():
         print(f"\n=== Step {k} ===")
         replay_buffer.clear()
         
-        # 1. Rollout Phase
-        for q, a in zip(batch["question"], batch["answer"]):
 
-            # GSM8K parsing. get value after "####" as oracle answer
-            if "####" in a:
-                oracle_answer = a.split("####")[-1].strip()
-            else:
-                oracle_answer = a # Fallback for dummy data
-            
+        # 1. Batched Rollout Phase
+        tasks = list(batch["question"])
+        oracle_answers = [
+            ans.split("####")[-1].strip() if "####" in ans else ans
+            for ans in batch["answer"]
+        ]
 
-            sequence_ids, returns, action_mask, _ = rollout(
-                model, tokenizer, q, oracle_answer, config["group_size"], reward_model, math_verifier,
-                config["min_rm"], config["max_rm"], config["alpha"], config["beta"], config["eps"]
+        sequence_ids, returns, action_mask, completions = rollout_batch(
+            model,
+            tokenizer,
+            tasks,
+            oracle_answers,
+            config["group_size"],
+            reward_model,
+            math_verifier,
+            config["min_rm"],
+            config["max_rm"],
+            config["alpha"],
+            config["beta"],
+            config["eps"],
+            max_new_tokens=config["max_length"],
+            device=device,
+        )
+
+        # 2. Experience Creation (batched)
+        with torch.no_grad():
+            att_mask = sequence_ids != tokenizer.eos_token_id
+            log_probs = sequences_log_probs(model, sequence_ids, att_mask)
+            log_probs_ref = sequences_log_probs(ref_model, sequence_ids, att_mask)
+
+            exp = Experience(
+                sequences=sequence_ids,
+                action_log_probs=log_probs,
+                log_probs_ref=log_probs_ref,
+                returns=returns,
+                advantages=group_advantages(returns),
+                attention_mask=att_mask,
+                action_mask=action_mask,
+                kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
             )
-            
-            # 2. Experience Creation
-            with torch.no_grad():
-                att_mask = sequence_ids != tokenizer.eos_token_id
-                log_probs = sequences_log_probs(model, sequence_ids, att_mask)
-                log_probs_ref = sequences_log_probs(ref_model, sequence_ids, att_mask)
-                
-                exp = Experience(
-                    sequences=sequence_ids,
-                    action_log_probs=log_probs,
-                    log_probs_ref=log_probs_ref,
-                    returns=returns,
-                    advantages=group_advantages(returns),
-                    attention_mask=att_mask,
-                    action_mask=action_mask,
-                    kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask)
-                )
-                replay_buffer.append(exp.to("cpu"))
+
+        replay_buffer.clear()
+        replay_buffer.append(exp.to("cpu"))
+
 
         # 3. Optimization Phase
         train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
