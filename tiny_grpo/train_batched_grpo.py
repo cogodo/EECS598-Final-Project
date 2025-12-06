@@ -17,12 +17,14 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, AutoModelForCausalL
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
-from utils import combine_hybrid_score
+from utils import combine_hybrid_score, get_final_reward
 from loss import approx_kl_divergence, GRPOLoss
 from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 
 SYSTEM_PROMPT = """You are a helpful math assistant. Please solve the problem step by step, showing your reasoning clearly. 
 Once you have solved the problem, provide your final numerical answer wrapped in <answer> tags, like this: <answer>number</answer>"""
+
+SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
 def load_model(
     model_name_or_path: str,
@@ -123,6 +125,7 @@ def rollout(
     action_mask = action_mask[:, 1:]
 
     # 5. Compute Batch Rewards (AceRM)
+    sigma_u = 0.0 # std dev of reward model scores across candidates
     t_rm_start = time.time()
     try:
         rm_scores_list = reward_model.compute_batch_reward(task, completions)
@@ -132,6 +135,8 @@ def rollout(
     except Exception as e:
         print(f"RM Failed: {e}")
         rm_scores_list = [0.0] * len(completions)
+    sigma_u = torch.std(torch.tensor(rm_scores_list))
+    SIGMA_BAR_LIST.append(sigma_u)
     rm_time = time.time() - t_rm_start
 
     # 6. Verify and Combine Scores
@@ -143,9 +148,14 @@ def rollout(
         verl_score = math_verifier.verify(task, completion, oracle_answer)["reward"]
         t_verify += (time.time() - t_v_start)
         
-        hybrid_reward = combine_hybrid_score(
+        # get r_hat according to verifier-rm blending
+        r_hat = combine_hybrid_score(
             verl_score, rm_scores_list[i], min_rm, max_rm, eps, alpha, beta
         )
+
+        # get final reward with variance aware reweighting
+        hybrid_reward = get_final_reward(r_hat, sigma_bar=torch.stack(SIGMA_BAR_LIST).mean(), sigma_u=sigma_u)
+
         returns[i] = hybrid_reward
 
     print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
@@ -200,21 +210,17 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=64)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2048)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
 
-    # --- Warmup to determine reward bounds --- #
+    # --- Warmup to determine reward model bounds --- #
     print("Running warmup to determine reward model bounds...")
     min_rm = float('inf')
     max_rm = float('-inf')
-    
-    #TEMP todo fix later
-    min_rm = -7
-    max_rm = 7
 
     temperature = 1.0
 
@@ -238,15 +244,15 @@ def main():
             
             try:
                 rm_outputs = reward_model.compute_reward(q, completion)
-                rm_score = rm_outputs.logits[0][0].item()
+                rm_score = rm_outputs[0]
                 min_rm = min(min_rm, rm_score)
                 max_rm = max(max_rm, rm_score)
             except Exception as e:
                 print(f"Warning during warmup: {e}")
     
     print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
+    print("\n ----- BEGIN TRAINING ------ \n")
 
-    
     # --- Training Loop ---
     for k, batch in enumerate(prompt_loader):
         print(f"\n=== Step {k} ===")
@@ -289,7 +295,9 @@ def main():
         train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
         
         model.train()
-        for _ in range(1): # epochs per step
+        curr_step_losses = []
+        curr_step_KLs = []
+        for _ in range(2): # epochs per step
             for exp in train_loader:
                 exp = exp.to(device)
                 optimizer.zero_grad()
@@ -303,9 +311,13 @@ def main():
                     optimizer.step()
                     wandb.log({"loss": loss.item(), "kl": kl.item()})
                     print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
+                    curr_step_losses.append(loss.item())
+                    curr_step_KLs.append(kl.item())
+
                 else:
                     print("Skipping non-finite loss")
-
+                    
+        print(f'Step {k} Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
         # 4. Checkpointing
         if (k + 1) % 5 == 0:
             model.save_pretrained(config["checkpoint_path"] / f"step_{k}")
