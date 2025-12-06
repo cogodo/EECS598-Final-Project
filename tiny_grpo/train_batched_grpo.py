@@ -163,6 +163,8 @@ def rollout(
 
         returns[i] = hybrid_reward
 
+    print(f"returns: {returns}")
+
     # print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
     
     return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
@@ -292,6 +294,9 @@ def main():
                 config["min_rm"], config["max_rm"], config["alpha"], config["beta"], config["eps"]
             )
             
+
+
+
             # 2. Experience Creation
             with torch.no_grad():
                 att_mask = sequence_ids != tokenizer.eos_token_id
