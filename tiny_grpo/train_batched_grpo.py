@@ -59,7 +59,7 @@ def read_jsonl(file_name: str | Path) -> Iterator:
         for line in f:
             yield json.loads(line)
 
-def read_prompts(file_name: str, predicate: Optional[Callable] = None, max_rows: Optional[int] = None) -> List:
+def read_prompts(file_name: str, predicate: Optional[Callable] = None, max_rows: Optional[int] = 200) -> List:
     rows = []
     for x in read_jsonl(file_name):
         if predicate is None or predicate(x):
@@ -344,6 +344,11 @@ def main():
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=None)
+    print(f"Loaded {len(test_prompts)} prompts")
+    test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
+    
+
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
 
@@ -396,98 +401,144 @@ def main():
     print("\n ----- BEGIN TRAINING ------ \n")
 
 
-    rewards = torch.zeros(len(prompts))
-    rewards_std = torch.zeros(len(prompts))
+    train_rewards = torch.zeros(len(prompts))
+    train_rewards_std = torch.zeros(len(prompts))
 
-    j = 0
+    test_rewards = torch.zeros(len(test_prompts))
+    test_rewards_std = torch.zeros(len(test_prompts))
 
-    # --- Training Loop ---
-    for k, batch in enumerate(prompt_loader):
-        print(f"\n=== Step {k} ===")
-        replay_buffer.clear()
-        
+    for e in range(epochs):
 
-        # 1. Batched Rollout Phase
-        tasks = list(batch["question"])
-        oracle_answers = [
-            ans.split("####")[-1].strip() if "####" in ans else ans
-            for ans in batch["answer"]
-        ]
+        reward_prompt = torch.zeros(len(prompts))
+        # --- Training Loop ---
+        for k, batch in enumerate(prompt_loader):
+            print(f"\n=== Step {k} ===")
+            replay_buffer.clear()
+            
 
-        sequence_ids, returns, action_mask, completions = rollout_batch(
-            model,
-            tokenizer,
-            tasks,
-            oracle_answers,
-            config["group_size"],
-            reward_model,
-            math_verifier,
-            config["min_rm"],
-            config["max_rm"],
-            config["alpha"],
-            config["beta"],
-            config["eps"],
-            max_new_tokens=config["max_length"],
-            device=device,
-        )
+            # 1. Batched Rollout Phase
+            tasks = list(batch["question"])
+            oracle_answers = [
+                ans.split("####")[-1].strip() if "####" in ans else ans
+                for ans in batch["answer"]
+            ]
 
-        rewards[k] = returns.mean()
-        rewards_std[k] = returns.std()
-
-        # 2. Experience Creation (batched)
-        with torch.no_grad():
-            att_mask = sequence_ids != tokenizer.eos_token_id
-            log_probs = sequences_log_probs(model, sequence_ids, att_mask)
-            log_probs_ref = sequences_log_probs(ref_model, sequence_ids, att_mask)
-
-            exp = Experience(
-                sequences=sequence_ids,
-                action_log_probs=log_probs,
-                log_probs_ref=log_probs_ref,
-                returns=returns,
-                advantages=group_advantages(returns),
-                attention_mask=att_mask,
-                action_mask=action_mask,
-                kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
+            sequence_ids, returns, action_mask, completions = rollout_batch(
+                model,
+                tokenizer,
+                tasks,
+                oracle_answers,
+                config["group_size"],
+                reward_model,
+                math_verifier,
+                config["min_rm"],
+                config["max_rm"],
+                config["alpha"],
+                config["beta"],
+                config["eps"],
+                max_new_tokens=config["max_length"],
+                device=device,
             )
 
-        replay_buffer.clear()
-        replay_buffer.append(exp.to("cpu"))
+            # 2. Experience Creation (batched)
+            with torch.no_grad():
+                att_mask = sequence_ids != tokenizer.eos_token_id
+                log_probs = sequences_log_probs(model, sequence_ids, att_mask)
+                log_probs_ref = sequences_log_probs(ref_model, sequence_ids, att_mask)
+
+                exp = Experience(
+                    sequences=sequence_ids,
+                    action_log_probs=log_probs,
+                    log_probs_ref=log_probs_ref,
+                    returns=returns,
+                    advantages=group_advantages(returns),
+                    attention_mask=att_mask,
+                    action_mask=action_mask,
+                    kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
+                )
+
+            replay_buffer.clear()
+            replay_buffer.append(exp.to("cpu"))
 
 
-        # 3. Optimization Phase
-        train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
-        
-        model.train()
-        curr_step_losses = []
-        curr_step_KLs = []
-        for _ in range(epochs): # epochs per step
-            for exp in train_loader:
-                exp = exp.to(device)
-                optimizer.zero_grad()
-                
-                curr_log_probs = sequences_log_probs(model, exp.sequences, exp.attention_mask)
-                loss, kl = objective(curr_log_probs, exp)
-                
-                if loss.isfinite():
-                    loss.backward()
-                    clip_grad_norm_(model.parameters(), config["max_norm"])
-                    optimizer.step()
-                    wandb.log({"loss": loss.item(), "kl": kl.item()})
-                    # unnecesart print
-                    # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
-                    curr_step_losses.append(loss.item())
-                    curr_step_KLs.append(kl.item())
+            # 3. Optimization Phase
+            train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
+            
+            model.train()
+            curr_step_losses = []
+            curr_step_KLs = []
 
-                else:
-                    print("Skipping non-finite loss")
+            optim_per_step = 1
+
+            # optimization steps per prompt
+            for _ in range(optim_per_step): 
+                for exp in train_loader:
+                    exp = exp.to(device)
+                    optimizer.zero_grad()
                     
-        print(f'Step {k} Averag Reward: {rewards[k]}, std Reward: {rewards_std[k]}, Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
+                    curr_log_probs = sequences_log_probs(model, exp.sequences, exp.attention_mask)
+                    loss, kl = objective(curr_log_probs, exp)
+                    
+                    if loss.isfinite():
+                        loss.backward()
+                        clip_grad_norm_(model.parameters(), config["max_norm"])
+                        optimizer.step()
+                        wandb.log({"loss": loss.item(), "kl": kl.item()})
+                        # unnecesart print
+                        # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
+                        curr_step_losses.append(loss.item())
+                        curr_step_KLs.append(kl.item())
+
+                    else:
+                        print("Skipping non-finite loss")
+
+            reward_prompt[k] = returns.mean()
+
+        test_reward_prompt = torch.zeros(len(test_prompts))
+        # --- testing_loop Loop ---
+        for k, batch in enumerate(test_prompt_loader):
+
+            # 1. Batched Rollout Phase
+            tasks = list(batch["question"])
+            oracle_answers = [
+                ans.split("####")[-1].strip() if "####" in ans else ans
+                for ans in batch["answer"]
+            ]
+
+            sequence_ids, returns, action_mask, completions = rollout_batch(
+                model,
+                tokenizer,
+                tasks,
+                oracle_answers,
+                config["group_size"],
+                reward_model,
+                math_verifier,
+                config["min_rm"],
+                config["max_rm"],
+                config["alpha"],
+                config["beta"],
+                config["eps"],
+                max_new_tokens=config["max_length"],
+                device=device,
+            )
+
+            test_reward_prompt[k] = returns.mean()
+
+
+
+        train_rewards[e] = reward_prompt.mean()
+        train_rewards_std[e] = reward_prompt.std()
+
+        test_rewards[e] = test_reward_prompt.mean()
+        test_rewards_std[e] = test_reward_prompt.std()
+
+
+        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}, Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
 
 
         # 4. Checkpointing
-        if (k + 1) % 20 == 0:
-            model.save_pretrained(config["checkpoint_path"] / f"step_{k}")
+        if (e + 1) % 20 == 0:
+            model.save_pretrained(config["checkpoint_path"] / f"step_{e}")
 
 
 
