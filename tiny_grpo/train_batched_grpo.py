@@ -43,7 +43,7 @@ def load_model(
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
-        dtype=torch.bfloat16 if bf16 else "auto",
+        torch_dtype=torch.bfloat16 if bf16 else "auto",
         device_map=device_map,
     )
 
