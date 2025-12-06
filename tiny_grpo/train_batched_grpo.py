@@ -403,45 +403,61 @@ def main():
     max_rm = float('-inf')
 
     temperature = 1.0
-
+    warmup_prompts = prompts[:min(20, len(prompts))]
     
     with torch.no_grad():
-        for i, prompt in enumerate(prompts[:min(20, len(prompts))]):
-            q = prompt["question"]
-            a = prompt["answer"]
-            # Generate a single completion for RM calibration
-            chat_messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": q},
-            ]
-            chat_prompt = tokenizer.apply_chat_template(
-                chat_messages, tokenize=False, add_generation_prompt=True
+        # Batch generate all completions
+        questions = [p["question"] for p in warmup_prompts]
+        answers = [p["answer"] for p in warmup_prompts]
+        
+        # Build chat prompts for all questions
+        chat_prompts = [
+            tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": q},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
             )
-            model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
-            gen_config = GenerationConfig(
-                do_sample=True,
-                temperature=temperature,
-                max_new_tokens=config["max_length"],
-                pad_token_id=tokenizer.eos_token_id,
-            )
-            output = model.generate(**model_inputs, generation_config=gen_config)
-            completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-            
+            for q in questions
+        ]
+        
+        # Tokenize and generate in batch
+        model_inputs = tokenizer(chat_prompts, return_tensors="pt", padding=True).to(device)
+        gen_config = GenerationConfig(
+            do_sample=True,
+            temperature=temperature,
+            max_new_tokens=config["max_length"],
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        outputs = model.generate(**model_inputs, generation_config=gen_config)
+        
+        # Decode all completions
+        completions = [
+            tokenizer.decode(output[model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            for output in outputs
+        ]
+        
+        # Batch compute rewards for all completions and answers
+        # Since completion and answer share the same prompt, we can batch them together
+        all_rm_scores = []
+        for q, comp, ans in zip(questions, completions, answers):
             try:
-                rm_outputs = reward_model.compute_reward(q, completion)
-                from_answer = reward_model.compute_reward(q, a)
-
-                rm_score = rm_outputs[0]
-                answer_score = from_answer[0]
-
-                min_rm = min(min_rm, rm_score)
-                min_rm = min(min_rm, answer_score)
-
-                max_rm = max(max_rm, rm_score)
-                max_rm = max(max_rm, answer_score)
-
+                # Batch compute reward for both completion and answer together (same prompt)
+                rm_scores = reward_model.compute_batch_reward(q, [comp, ans])
+                
+                rm_score = rm_scores[0]
+                answer_score = rm_scores[1]
+                
+                all_rm_scores.extend([rm_score, answer_score])
+                
             except Exception as e:
-                print(f"Warning during warmup: {e}")
+                print(f"Warning during warmup for question: {e}")
+        
+        if all_rm_scores:
+            min_rm = min(all_rm_scores)
+            max_rm = max(all_rm_scores)
     
     print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
     
