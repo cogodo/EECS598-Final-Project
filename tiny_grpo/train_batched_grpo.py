@@ -404,8 +404,8 @@ def main():
     train_rewards = torch.zeros(len(prompts))
     train_rewards_std = torch.zeros(len(prompts))
 
-    test_rewards = torch.zeros(len(test_prompts))
-    test_rewards_std = torch.zeros(len(test_prompts))
+    test_rewards = torch.zeros(epochs)
+    test_rewards_std = torch.zeros(epochs)
 
     for e in range(epochs):
 
