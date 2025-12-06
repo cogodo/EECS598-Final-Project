@@ -293,9 +293,9 @@ def main():
                 model, tokenizer, q, oracle_answer, config["group_size"], reward_model, math_verifier,
                 config["min_rm"], config["max_rm"], config["alpha"], config["beta"], config["eps"]
             )
-            
 
-
+            print("LINE 297")
+            print(f"returns: {returns}")
 
             # 2. Experience Creation
             with torch.no_grad():
@@ -335,7 +335,7 @@ def main():
                     optimizer.step()
                     wandb.log({"loss": loss.item(), "kl": kl.item()})
                     # unnecesart print
-                    # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
+                    print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
                     curr_step_losses.append(loss.item())
                     curr_step_KLs.append(kl.item())
 
