@@ -4,8 +4,8 @@ from typing import List, Union
 
 class AceRewardModel:
     # previously used 7B paramater reward modle
-    # def __init__(self, model_name: str = "nvidia/AceMath-7B-RM"):
-    def __init__(self, model_name: str = "nvidia/AceMath-1.5B-Instruct"):
+    def __init__(self, model_name: str = "nvidia/AceMath-7B-RM"):
+    # def __init__(self, model_name: str = "nvidia/AceMath-1.5B-Instruct"):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Load tokenizer first to handle padding logic

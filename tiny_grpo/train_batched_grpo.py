@@ -495,6 +495,7 @@ def main():
             reward_prompt[k] = returns.mean()
 
         test_reward_prompt = torch.zeros(len(test_prompts))
+        model.eval()
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
@@ -522,7 +523,9 @@ def main():
                 device=device,
             )
 
+            print(returns)
             test_reward_prompt[k] = returns.mean()
+
 
 
 
