@@ -26,7 +26,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 1
+epochs = 5
 
 def load_model(
     model_name_or_path: str,
@@ -340,11 +340,11 @@ def main():
 
     # --- Data Loading ---
     # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=None)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=20)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=None)
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2)
     print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -412,7 +412,7 @@ def main():
         reward_prompt = torch.zeros(len(prompts))
         # --- Training Loop ---
         for k, batch in enumerate(prompt_loader):
-            print(f"\n=== Step {k} ===")
+            # print(f"\n=== Step {k} ===")
             replay_buffer.clear()
             
 
