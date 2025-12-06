@@ -215,6 +215,7 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
+    # adjust max_rows for training size
     prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=200)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
@@ -264,6 +265,11 @@ def main():
                 print(f"Warning during warmup: {e}")
     
     print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
+    
+    config["min_rm"] = min_rm
+    config["max_rm"] = max_rm
+
+
     print("\n ----- BEGIN TRAINING ------ \n")
 
     # --- Training Loop ---
