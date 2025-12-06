@@ -187,8 +187,6 @@ def rollout(
 
         returns[i] = hybrid_reward
 
-    print(f"returns: {returns}")
-
     # print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
     
     return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
@@ -216,7 +214,6 @@ def rollout_batch(
 
     B = len(tasks)                         # batch_size (# of questions)
     K = num_rollouts                       # group_size
-    total = B * K                          # total completions
 
     # 1. Build chat prompts for all tasks
     chat_prompts = [
@@ -421,7 +418,13 @@ def main():
                 chat_messages, tokenize=False, add_generation_prompt=True
             )
             model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
-            output = model.generate(**model_inputs, max_length=config["max_length"], temperature=temperature, do_sample=True)
+            gen_config = GenerationConfig(
+                do_sample=True,
+                temperature=temperature,
+                max_new_tokens=config["max_length"],
+                pad_token_id=tokenizer.eos_token_id,
+            )
+            output = model.generate(**model_inputs, generation_config=gen_config)
             completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             
             try:
@@ -449,15 +452,15 @@ def main():
     print("\n ----- BEGIN TRAINING ------ \n")
 
 
-    train_rewards = torch.zeros(len(prompts))
-    train_rewards_std = torch.zeros(len(prompts))
+    train_rewards = torch.zeros(epochs)
+    train_rewards_std = torch.zeros(epochs)
 
-    test_rewards = torch.zeros(len(test_prompts))
-    test_rewards_std = torch.zeros(len(test_prompts))
+    test_rewards = torch.zeros(epochs)
+    test_rewards_std = torch.zeros(epochs)
 
     for e in range(epochs):
 
-        reward_prompt = torch.zeros(len(prompts))
+        reward_prompt = []
         # --- Training Loop ---
         for k, batch in enumerate(prompt_loader):
             # print(f"\n=== Step {k} ===")
@@ -505,7 +508,7 @@ def main():
                     kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
                 )
 
-            replay_buffer.append(exp.to("cpu"))
+            replay_buffer.append(exp)
 
             # 3. Optimization Phase
             train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
@@ -538,9 +541,9 @@ def main():
                     else:
                         print("Skipping non-finite loss")
 
-            reward_prompt[k] = returns.mean()
+            reward_prompt.append(returns.mean().item())
 
-        test_reward_prompt = torch.zeros(len(test_prompts))
+        test_reward_prompt = []
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
@@ -568,18 +571,19 @@ def main():
                 device=device,
             )
 
-            test_reward_prompt[k] = returns.mean()
+            test_reward_prompt.append(returns.mean().item())
 
 
 
-        train_rewards[e] = reward_prompt.mean()
-        train_rewards_std[e] = reward_prompt.std()
+        train_rewards[e] = torch.tensor(reward_prompt).mean() if reward_prompt else 0.0
+        train_rewards_std[e] = torch.tensor(reward_prompt).std() if reward_prompt else 0.0
 
-        test_rewards[e] = test_reward_prompt.mean()
-        test_rewards_std[e] = test_reward_prompt.std()
+        test_rewards[e] = torch.tensor(test_reward_prompt).mean() if test_reward_prompt else 0.0
+        test_rewards_std[e] = torch.tensor(test_reward_prompt).std() if test_reward_prompt else 0.0
 
-
-        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}, Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
+        avg_loss = sum(curr_step_losses) / len(curr_step_losses) if curr_step_losses else 0.0
+        avg_kl = sum(curr_step_KLs) / len(curr_step_KLs) if curr_step_KLs else 0.0
+        print(f'Step {e}, Average Train Reward: {train_rewards[e]:.4f}, Average Train STD: {train_rewards_std[e]:.4f}, Average Test Reward: {test_rewards[e]:.4f}, Average Test Reward STD: {test_rewards_std[e]:.4f}, Average loss: {avg_loss:.4f}, kl: {avg_kl:.4f}')
 
 
         # 4. Checkpointing
