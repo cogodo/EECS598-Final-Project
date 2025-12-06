@@ -26,6 +26,8 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
+epochs = 2
+
 def load_model(
     model_name_or_path: str,
     trust_remote_code: bool = False,
@@ -135,6 +137,8 @@ def rollout(
     except Exception as e:
         print(f"RM Failed: {e}")
         rm_scores_list = [0.0] * len(completions)
+
+    # standard deviation of reward model
     sigma_u = torch.std(torch.tensor(rm_scores_list))
     SIGMA_BAR_LIST.append(sigma_u)
     rm_time = time.time() - t_rm_start
@@ -143,6 +147,8 @@ def rollout(
     returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
     t_verify = 0
     
+    print(f"rm_scores_list: {rm_scores_list}")
+
     for i, completion in enumerate(completions):
         t_v_start = time.time()
         verl_score = math_verifier.verify(task, completion, oracle_answer)["reward"]
@@ -297,7 +303,7 @@ def main():
         model.train()
         curr_step_losses = []
         curr_step_KLs = []
-        for _ in range(2): # epochs per step
+        for _ in range(epochs): # epochs per step
             for exp in train_loader:
                 exp = exp.to(device)
                 optimizer.zero_grad()
@@ -310,7 +316,8 @@ def main():
                     clip_grad_norm_(model.parameters(), config["max_norm"])
                     optimizer.step()
                     wandb.log({"loss": loss.item(), "kl": kl.item()})
-                    print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
+                    # unnecesart print
+                    # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
                     curr_step_losses.append(loss.item())
                     curr_step_KLs.append(kl.item())
 
