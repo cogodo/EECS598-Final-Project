@@ -147,7 +147,6 @@ def rollout(
     returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
     t_verify = 0
     
-    print(f"rm_scores_list: {rm_scores_list}")
 
     for i, completion in enumerate(completions):
         t_v_start = time.time()
@@ -164,7 +163,7 @@ def rollout(
 
         returns[i] = hybrid_reward
 
-    print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
+    # print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
     
     return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
 
