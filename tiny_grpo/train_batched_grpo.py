@@ -216,7 +216,7 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2048)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=None)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -233,7 +233,7 @@ def main():
     max_length = 512
 
     with torch.no_grad():
-        for i, prompt in enumerate(prompts[:min(10, len(prompts))]):
+        for i, prompt in enumerate(prompts[:min(20, len(prompts))]):
             q = prompt["question"]
             a = prompt["answer"]
             # Generate a single completion for RM calibration
@@ -250,9 +250,17 @@ def main():
             
             try:
                 rm_outputs = reward_model.compute_reward(q, completion)
+                from_answer = reward_model.compute_reward(q, a)
+
                 rm_score = rm_outputs[0]
+                answer_score = from_answer[0]
+
                 min_rm = min(min_rm, rm_score)
+                min_rm = min(min_rm, answer_score)
+
                 max_rm = max(max_rm, rm_score)
+                max_rm = max(max_rm, answer_score)
+
             except Exception as e:
                 print(f"Warning during warmup: {e}")
     
@@ -326,7 +334,7 @@ def main():
                     
         print(f'Step {k} Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
         # 4. Checkpointing
-        if (k + 1) % 5 == 0:
+        if (k + 1) % 20 == 0:
             model.save_pretrained(config["checkpoint_path"] / f"step_{k}")
 
 if __name__ == "__main__":
