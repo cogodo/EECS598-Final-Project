@@ -26,7 +26,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 50
+epochs = 200
 
 def load_model(
     model_name_or_path: str,
@@ -540,7 +540,7 @@ def main():
         test_rewards_std[e] = test_reward_prompt.std()
 
 
-        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
+        print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
         # 4. Checkpointing
         if (e + 1) % 20 == 0:
