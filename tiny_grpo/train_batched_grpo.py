@@ -519,7 +519,7 @@ def main():
                         print("Skipping non-finite loss")
 
             reward_prompt[k] = returns.mean()
-            print("verifier_returns")
+            print(f"verifier_returns {verifer_returns}")
             verifer_reward_prompt[k] = verifer_returns.mean()
 
 
@@ -566,7 +566,7 @@ def main():
         test_verifier[e] = test_verifier_reward_prompt.mean()
 
 
-        print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
+        print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, train_verifier: {train_verifier[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, test_verifier: {test_verifier[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
         # 4. Checkpointing
         if (e + 1) % 20 == 0:
@@ -576,8 +576,12 @@ def main():
     History = {
         "train_rewards": train_rewards,
         "train_rewards_std": train_rewards_std,
+        "train_verifier": train_verifier,
         "test_rewards": test_rewards,
         "test_rewards_std": test_rewards_std,
+        "train_verifier": train_verifier,
+        "train_verifier": train_verifier,
+        "test_verifier": test_verifier,
         "curr_step_losses": curr_step_losses_epoch,
         "KL_Divergence": curr_step_KL_epoch
     }
