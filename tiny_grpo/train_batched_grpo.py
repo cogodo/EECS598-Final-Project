@@ -415,16 +415,15 @@ def main():
     print("\n ----- BEGIN TRAINING ------ \n")
 
 
-    train_rewards = torch.zeros(len(epochs))
-    train_rewards_std = torch.zeros(len(epochs))
+    train_rewards = torch.zeros(epochs)
+    train_rewards_std = torch.zeros(epochs)
 
-    train_verifier = torch.zeros(len(epochs))
+    train_verifier = torch.zeros(epochs)
 
     test_rewards = torch.zeros(epochs)
     test_rewards_std = torch.zeros(epochs)
 
-    test_verifier = torch.zeros(len(epochs))
-
+    test_verifier = torch.zeros(epochs)
 
     curr_step_losses_epoch = torch.zeros(epochs)
     curr_step_KL_epoch = torch.zeros(epochs)
