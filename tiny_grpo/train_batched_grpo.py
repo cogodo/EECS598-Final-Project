@@ -27,7 +27,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 5
+epochs = 100  # More epochs for granular graphing
 
 def load_model(
     model_name_or_path: str,
@@ -324,10 +324,10 @@ def main():
         "seed": 42,
         "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "checkpoint_path": Path("./output"),
-        "train_batch_size": 8,
+        "train_batch_size": 16,
         "lr": 1e-5,
         "group_size": 8,
-        "rollouts_per_step": 8,
+        "rollouts_per_step": 16,
         "max_norm": 1.0,
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
@@ -343,7 +343,11 @@ def main():
     
     init_rng(config["seed"])
     device = torch.device("cuda", 0)
-    wandb.init(mode="disabled") # Set to "online" for tracking
+    wandb.init(
+        project="tiny-grpo",
+        name=f"tinyllama-lora-{epochs}ep",
+        config=config,
+    )
 
     # --- Load Models ---
     print("Loading Models...")
@@ -384,14 +388,15 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=20)
-    print(f"Loaded {len(prompts)} prompts")
+    # Use subset per epoch for more granular logging (500 prompts × 100 epochs covers dataset ~7x)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=500)
+    print(f"Loaded {len(prompts)} prompts per epoch")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2)
-    print(f"Loaded {len(test_prompts)} prompts")
-    test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
+    # Use ~200 test samples for evaluation
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=200)
+    print(f"Loaded {len(test_prompts)} test prompts")
+    test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
     
 
     replay_buffer = ReplayBuffer()
@@ -403,7 +408,7 @@ def main():
     max_rm = float('-inf')
 
     temperature = 1.0
-    warmup_prompts = prompts[:min(20, len(prompts))]
+    warmup_prompts = prompts[:min(50, len(prompts))]  # More warmup samples for better RM bounds
     
     with torch.no_grad():
         # Batch generate all completions
@@ -533,7 +538,7 @@ def main():
             curr_step_losses = []
             curr_step_KLs = []
 
-            optim_per_step = 1
+            optim_per_step = 4
 
             # optimization steps per prompt
             for _ in range(optim_per_step): 
@@ -599,12 +604,24 @@ def main():
 
         avg_loss = sum(curr_step_losses) / len(curr_step_losses) if curr_step_losses else 0.0
         avg_kl = sum(curr_step_KLs) / len(curr_step_KLs) if curr_step_KLs else 0.0
-        print(f'Step {e}, Average Train Reward: {train_rewards[e]:.4f}, Average Train STD: {train_rewards_std[e]:.4f}, Average Test Reward: {test_rewards[e]:.4f}, Average Test Reward STD: {test_rewards_std[e]:.4f}, Average loss: {avg_loss:.4f}, kl: {avg_kl:.4f}')
+        
+        # Log epoch metrics to wandb
+        wandb.log({
+            "epoch": e,
+            "train_reward": train_rewards[e].item(),
+            "train_reward_std": train_rewards_std[e].item(),
+            "test_reward": test_rewards[e].item(),
+            "test_reward_std": test_rewards_std[e].item(),
+            "epoch_avg_loss": avg_loss,
+            "epoch_avg_kl": avg_kl,
+        })
+        
+        print(f'Epoch {e}, Train Reward: {train_rewards[e]:.4f} ± {train_rewards_std[e]:.4f}, Test Reward: {test_rewards[e]:.4f} ± {test_rewards_std[e]:.4f}, Loss: {avg_loss:.4f}, KL: {avg_kl:.4f}')
 
 
-        # 4. Checkpointing
-        if (e + 1) % 20 == 0:
-            model.save_pretrained(config["checkpoint_path"] / f"step_{e}")
+        # 4. Checkpointing - save every 10 epochs
+        if (e + 1) % 10 == 0:
+            model.save_pretrained(config["checkpoint_path"] / f"epoch_{e}")
 
 
 
