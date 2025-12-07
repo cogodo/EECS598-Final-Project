@@ -28,7 +28,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 SIGMA_BAR_LIST = []  # running values of sigma_u (stdev of rm scores) - capped at 100 for memory
 SIGMA_BAR_MAX_LEN = 100  # Rolling window size
 
-epochs = 100  # More epochs for granular graphing
+epochs = 50
 
 def load_model(
     model_name_or_path: str,
@@ -263,10 +263,18 @@ def rollout_batch(
     )
 
     # 6. Build masks
+    # Action mask: True for generated tokens (excluding EOS), used for loss computation
     action_mask = torch.zeros_like(generated, dtype=torch.bool)
-    action_mask[:, enc["input_ids"].shape[1]:] = True
+    action_mask[:, input_ids.shape[1]:] = True
     action_mask[generated == tokenizer.eos_token_id] = False
     action_mask = action_mask[:, 1:]
+    
+    # Attention mask: extend the original prompt attention mask with 1s for all generated tokens
+    # This correctly handles left-padding while attending to generated content including EOS
+    prompt_len = input_ids.shape[1]
+    gen_len = generated.shape[1] - prompt_len
+    gen_attn = torch.ones(generated.shape[0], gen_len, dtype=attn_mask.dtype, device=device)
+    full_attn_mask = torch.cat([attn_mask, gen_attn], dim=1)
 
     # 7. Compute rewards (still per question)
     all_returns = []
@@ -303,7 +311,7 @@ def rollout_batch(
     # stack into [B*K, 1]
     all_returns = torch.cat(all_returns, dim=0)
 
-    return generated, all_returns, action_mask, completions
+    return generated, all_returns, action_mask, full_attn_mask, completions
 
 
 
@@ -413,13 +421,13 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    # 160 prompts × 100 epochs ≈ 2.5 hours (10 batches/epoch × 10s/batch × 100 epochs)
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=160)
+    # 100 prompts × 50 epochs
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=100)
     print(f"Loaded {len(prompts)} prompts per epoch")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    # Use ~200 test samples for evaluation
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=200)
+    # 50 test samples for evaluation
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=50)
     print(f"Loaded {len(test_prompts)} test prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
     
@@ -520,7 +528,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, attention_mask, completions = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -539,9 +547,8 @@ def main():
 
             # 2. Experience Creation (batched)
             with torch.no_grad():
-                att_mask = sequence_ids != tokenizer.eos_token_id
-                log_probs = sequences_log_probs(model, sequence_ids, att_mask)
-                log_probs_ref = sequences_log_probs(ref_model, sequence_ids, att_mask)
+                log_probs = sequences_log_probs(model, sequence_ids, attention_mask)
+                log_probs_ref = sequences_log_probs(ref_model, sequence_ids, attention_mask)
 
                 exp = Experience(
                     sequences=sequence_ids,
@@ -549,7 +556,7 @@ def main():
                     log_probs_ref=log_probs_ref,
                     returns=returns,
                     advantages=group_advantages(returns, config["group_size"]),
-                    attention_mask=att_mask,
+                    attention_mask=attention_mask,
                     action_mask=action_mask,
                     kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
                 )
@@ -601,7 +608,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, attention_mask, completions = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
