@@ -26,7 +26,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 200
+epochs = 50
 
 def load_model(
     model_name_or_path: str,
