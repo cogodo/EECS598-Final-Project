@@ -346,7 +346,7 @@ def main():
     
     test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
     print(f"Loaded {len(test_prompts)} prompts")
-    test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
+    test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
 
     print(f"LINE 351 len(prompts): {len(prompts)}")
     print(f"LINE 352 len(test_prompts): {len(test_prompts)}")
