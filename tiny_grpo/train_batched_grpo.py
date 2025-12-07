@@ -348,10 +348,6 @@ def main():
     print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
 
-    print(f"LINE 351 len(prompts): {len(prompts)}")
-    print(f"LINE 352 len(test_prompts): {len(test_prompts)}")
-
-
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
 
@@ -409,6 +405,9 @@ def main():
 
     test_rewards = torch.zeros(epochs)
     test_rewards_std = torch.zeros(epochs)
+
+    curr_step_losses_epoch = torch.zeros(epochs)
+    curr_step_KL_epoch = torch.zeros(epochs)
 
     for e in range(epochs):
 
@@ -491,6 +490,10 @@ def main():
                         # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
                         curr_step_losses.append(loss.item())
                         curr_step_KLs.append(kl.item())
+                    
+                        if _ == 0:
+                            curr_step_losses_epoch[e] = loss.item()
+                            curr_step_KL_epoch[e] = kl.item()
 
                     else:
                         print("Skipping non-finite loss")
@@ -500,8 +503,6 @@ def main():
         test_reward_prompt = torch.zeros(len(test_prompts))
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
-
-            print("HELLO LINE 501")
 
             # 1. Batched Rollout Phase
             tasks = list(batch["question"])
@@ -527,7 +528,6 @@ def main():
                 device=device,
             )
 
-            print(f"LINE 525 rewards: {returns}")
 
 
             test_reward_prompt[k] = returns.mean()
@@ -540,7 +540,7 @@ def main():
         test_rewards_std[e] = test_reward_prompt.std()
 
 
-        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}')
+        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
 
         # 4. Checkpointing
@@ -548,14 +548,17 @@ def main():
             model.save_pretrained(config["checkpoint_path"] / f"step_{e}")
 
 
-    Hisotry = {
+    History = {
         "train_rewards": train_rewards,
         "train_rewards_std": train_rewards_std,
         "test_rewards": test_rewards,
         "test_rewards_std": test_rewards_std,
+        "curr_step_losses": curr_step_losses_epoch,
+        "KL_Divergence": curr_step_KL_epoch
     }
 
-    torch.save(Hisotry, "Reward_history.pt")
+
+    torch.save(History, "Reward_history.pt")
 
 
 
