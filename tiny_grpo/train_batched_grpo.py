@@ -347,7 +347,10 @@ def main():
     test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
     print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
-    
+
+    print(f"LINE 351 len(prompts): {len(prompts)}")
+    print(f"LINE 352 len(test_prompts): {len(test_prompts)}")
+
 
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
@@ -498,6 +501,8 @@ def main():
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
+            print("HELLO LINE 501")
+
             # 1. Batched Rollout Phase
             tasks = list(batch["question"])
             oracle_answers = [
@@ -535,7 +540,7 @@ def main():
         test_rewards_std[e] = test_reward_prompt.std()
 
 
-        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}, Average loss: {sum(curr_step_losses)/len(curr_step_losses):.4f}, kl: {sum(curr_step_KLs)/len(curr_step_KLs):.4f}')
+        print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}')
 
 
         # 4. Checkpointing
