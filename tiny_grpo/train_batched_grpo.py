@@ -25,7 +25,8 @@ from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 SYSTEM_PROMPT = """You are a helpful math assistant. Please solve the problem step by step, showing your reasoning clearly. 
 Once you have solved the problem, provide your final numerical answer wrapped in <answer> tags, like this: <answer>number</answer>"""
 
-SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
+SIGMA_BAR_LIST = []  # running values of sigma_u (stdev of rm scores) - capped at 100 for memory
+SIGMA_BAR_MAX_LEN = 100  # Rolling window size
 
 epochs = 100  # More epochs for granular graphing
 
@@ -165,6 +166,8 @@ def rollout(
     # standard deviation of reward model
     sigma_u = torch.std(torch.tensor(rm_scores_list))
     SIGMA_BAR_LIST.append(sigma_u)
+    if len(SIGMA_BAR_LIST) > SIGMA_BAR_MAX_LEN:
+        SIGMA_BAR_LIST.pop(0)  # Remove oldest to maintain rolling window
     rm_time = time.time() - t_rm_start
 
     # 6. Verify and Combine Scores
@@ -278,6 +281,8 @@ def rollout_batch(
 
         sigma_u = rm_scores_t.std()
         SIGMA_BAR_LIST.append(sigma_u)
+        if len(SIGMA_BAR_LIST) > SIGMA_BAR_MAX_LEN:
+            SIGMA_BAR_LIST.pop(0)  # Remove oldest to maintain rolling window
         sigma_bar = torch.stack(SIGMA_BAR_LIST).mean()
 
         returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
@@ -302,8 +307,28 @@ def rollout_batch(
 
 
 
-def group_advantages(returns: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    return (returns - returns.mean()) / (returns.std() + eps)
+def group_advantages(returns: torch.Tensor, group_size: int, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Compute advantages normalized WITHIN each group (same prompt, different completions).
+    This is the key insight of GRPO - compare completions for the same prompt.
+    
+    Args:
+        returns: [B*K, 1] tensor of rewards
+        group_size: K (number of completions per prompt)
+    Returns:
+        [B*K, 1] tensor of normalized advantages
+    """
+    # Reshape to [B, K] for per-group normalization
+    batch_size = returns.shape[0] // group_size
+    returns_grouped = returns.view(batch_size, group_size)
+    
+    # Normalize within each group (across K completions for same prompt)
+    group_mean = returns_grouped.mean(dim=1, keepdim=True)
+    group_std = returns_grouped.std(dim=1, keepdim=True)
+    advantages = (returns_grouped - group_mean) / (group_std + eps)
+    
+    # Reshape back to [B*K, 1]
+    return advantages.view(-1, 1)
 
 def sequences_log_probs(model, sequence_ids, attention_mask):
     position_ids = attention_mask.long().cumsum(dim=-1) - 1
@@ -388,8 +413,8 @@ def main():
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    # Use subset per epoch for more granular logging (500 prompts × 100 epochs covers dataset ~7x)
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=500)
+    # 160 prompts × 100 epochs ≈ 2.5 hours (10 batches/epoch × 10s/batch × 100 epochs)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=160)
     print(f"Loaded {len(prompts)} prompts per epoch")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -400,7 +425,7 @@ def main():
     
 
     replay_buffer = ReplayBuffer()
-    objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
+    objective = GRPOLoss(clip_eps=0.2, kl_weight=0.1)  # Increased from 0.01 to prevent KL collapse
 
     # --- Warmup to determine reward model bounds --- #
     print("Running warmup to determine reward model bounds...")
@@ -523,7 +548,7 @@ def main():
                     action_log_probs=log_probs,
                     log_probs_ref=log_probs_ref,
                     returns=returns,
-                    advantages=group_advantages(returns),
+                    advantages=group_advantages(returns, config["group_size"]),
                     attention_mask=att_mask,
                     action_mask=action_mask,
                     kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
@@ -538,7 +563,7 @@ def main():
             curr_step_losses = []
             curr_step_KLs = []
 
-            optim_per_step = 4
+            optim_per_step = 2  # Reduced from 4 to prevent over-optimization
 
             # optimization steps per prompt
             for _ in range(optim_per_step): 
@@ -566,6 +591,7 @@ def main():
 
         test_reward_prompt = []
         # --- testing_loop Loop ---
+        model.eval()  # Switch to eval mode for test rollouts
         for k, batch in enumerate(test_prompt_loader):
 
             # 1. Batched Rollout Phase
