@@ -519,8 +519,7 @@ def main():
                         print("Skipping non-finite loss")
 
             reward_prompt[k] = returns.mean()
-            print(f"verifier_returns {verifer_returns}")
-            verifer_reward_prompt[k] = verifer_returns.mean()
+            verifer_reward_prompt[k] = verifer_returns.max()
 
 
 
@@ -555,7 +554,7 @@ def main():
 
 
             test_reward_prompt[k] = returns.mean()
-            test_verifier_reward_prompt[k] = verifer_returns.mean()
+            test_verifier_reward_prompt[k] = verifer_returns.max()
 
         train_rewards[e] = reward_prompt.mean()
         train_rewards_std[e] = reward_prompt.std()
