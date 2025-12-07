@@ -26,7 +26,7 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 20
+epochs = 3
 
 def load_model(
     model_name_or_path: str,
@@ -340,11 +340,11 @@ def main():
 
     # --- Data Loading ---
     # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=3)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2)
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
     print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -542,6 +542,15 @@ def main():
         if (e + 1) % 20 == 0:
             model.save_pretrained(config["checkpoint_path"] / f"step_{e}")
 
+
+    Hisotry = {
+        "train_rewards": train_rewards,
+        "train_rewards_std": train_rewards_std,
+        "test_rewards": test_rewards,
+        "test_rewards_std": test_rewards_std,
+    }
+
+    torch.save(Hisotry, "Reward_history.pt")
 
 
 
