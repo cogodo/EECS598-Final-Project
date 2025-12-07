@@ -340,11 +340,11 @@ def main():
 
     # --- Data Loading ---
     # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=20)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=5)
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=10)
     print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
 
@@ -541,7 +541,6 @@ def main():
 
 
         print(f'Step {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Train Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
-
 
         # 4. Checkpointing
         if (e + 1) % 20 == 0:
