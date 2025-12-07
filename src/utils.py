@@ -32,3 +32,4 @@ def get_our_final_reward(r_hat, sigma_bar, sigma_u):
     r_final = w_difficulty*r_hat
 
     return r_final
+

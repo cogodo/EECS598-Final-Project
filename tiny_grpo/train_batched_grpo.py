@@ -157,6 +157,9 @@ def rollout(
 
     # 6. Verify and Combine Scores
     returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
+    verifier_returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
+
+
     t_verify = 0
     
 
@@ -175,9 +178,11 @@ def rollout(
 
         returns[i] = hybrid_reward
 
+        verifier_returns[i] = verl_score
+
     # print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
     
-    return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
+    return sequence_ids, returns.to(sequence_ids.device), action_mask, completions, verifier_returns
 
 @torch.no_grad()
 def rollout_batch(
@@ -256,6 +261,7 @@ def rollout_batch(
 
     # 7. Compute rewards (still per question)
     all_returns = []
+    all_verifier_returns = []
     idx = 0
 
     for task, oracle in zip(tasks, oracle_answers):
@@ -270,6 +276,8 @@ def rollout_batch(
         sigma_bar = torch.stack(SIGMA_BAR_LIST).mean()
 
         returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
+        verifier_returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
+
 
         for i, comp in enumerate(each_completions):
             verl_score = math_verifier.verify(task, comp, oracle)["reward"]
@@ -281,13 +289,20 @@ def rollout_batch(
             hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
             returns[i] = hybrid
 
+            verifier_returns[i] = verl_score
+
+
         all_returns.append(returns)
+        all_verifier_returns.append(verifier_returns)
+
         idx += K
 
     # stack into [B*K, 1]
     all_returns = torch.cat(all_returns, dim=0)
+    all_verifier_returns = torch.cat(all_verifier_returns, dim=0)
 
-    return generated, all_returns, action_mask, completions
+
+    return generated, all_returns, action_mask, completions, all_verifier_returns
 
 
 
@@ -400,11 +415,16 @@ def main():
     print("\n ----- BEGIN TRAINING ------ \n")
 
 
-    train_rewards = torch.zeros(len(prompts))
-    train_rewards_std = torch.zeros(len(prompts))
+    train_rewards = torch.zeros(len(epochs))
+    train_rewards_std = torch.zeros(len(epochs))
+
+    train_verifier = torch.zeros(len(epochs))
 
     test_rewards = torch.zeros(epochs)
     test_rewards_std = torch.zeros(epochs)
+
+    test_verifier = torch.zeros(len(epochs))
+
 
     curr_step_losses_epoch = torch.zeros(epochs)
     curr_step_KL_epoch = torch.zeros(epochs)
@@ -412,6 +432,7 @@ def main():
     for e in range(epochs):
 
         reward_prompt = torch.zeros(len(prompts))
+        verifer_reward_prompt = torch.zeros(len(prompts))
         # --- Training Loop ---
         for k, batch in enumerate(prompt_loader):
             # print(f"\n=== Step {k} ===")
@@ -425,7 +446,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -499,8 +520,13 @@ def main():
                         print("Skipping non-finite loss")
 
             reward_prompt[k] = returns.mean()
+            print("verifier_returns")
+            verifer_reward_prompt[k] = verifer_returns.mean()
+
+
 
         test_reward_prompt = torch.zeros(len(test_prompts))
+        test_verifier_reward_prompt = torch.zeros(len(test_prompts))
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
@@ -511,7 +537,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -529,15 +555,16 @@ def main():
             )
 
 
-
             test_reward_prompt[k] = returns.mean()
-
+            test_verifier_reward_prompt[k] = verifer_returns.mean()
 
         train_rewards[e] = reward_prompt.mean()
         train_rewards_std[e] = reward_prompt.std()
+        train_verifier[e] = verifer_reward_prompt.mean()
 
         test_rewards[e] = test_reward_prompt.mean()
         test_rewards_std[e] = test_reward_prompt.std()
+        test_verifier[e] = test_verifier_reward_prompt.mean()
 
 
         print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
