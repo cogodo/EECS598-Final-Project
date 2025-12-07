@@ -340,7 +340,7 @@ def main():
 
     # --- Data Loading ---
     # adjust max_rows for training size
-    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=2)
+    prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=3)
     print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
@@ -523,7 +523,7 @@ def main():
             )
 
             print(f"LINE 525 rewards: {returns}")
-#            print(returns)
+
 
             test_reward_prompt[k] = returns.mean()
 
