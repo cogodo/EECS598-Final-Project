@@ -12,13 +12,12 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.profiler import profile, ProfilerActivity, record_function
 from transformers import AutoTokenizer, PreTrainedTokenizer, AutoModelForCausalLM, GenerationConfig
-from peft import LoraConfig, get_peft_model
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
-from utils import combine_hybrid_score, get_final_reward
+from utils import combine_hybrid_score, get_final_reward, tanh_combine_reward
 from loss import approx_kl_divergence, GRPOLoss
 from replay_buffer import ReplayBuffer, Experience, join_experience_batch
 
@@ -27,15 +26,13 @@ Once you have solved the problem, provide your final numerical answer wrapped in
 
 SIGMA_BAR_LIST = [] # running values of sigma us - the stdev of rm scores
 
-epochs = 100  # More epochs for granular graphing
+epochs = 50
 
 def load_model(
     model_name_or_path: str,
     trust_remote_code: bool = False,
     bf16: bool = True,
     device_map=None,
-    use_lora: bool = False,
-    lora_config: Optional[LoraConfig] = None,
 ) -> Tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
@@ -51,15 +48,6 @@ def load_model(
     )
 
     model.config.pad_token_id = tokenizer.eos_token_id
-    
-    # Apply LoRA if requested
-    if use_lora:
-        if lora_config is None:
-            raise ValueError("lora_config must be provided when use_lora=True")
-        print(f"✓ Applying LoRA: r={lora_config.r}, alpha={lora_config.lora_alpha}")
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-    
     return model, tokenizer
 
 def init_rng(seed: int):
@@ -169,6 +157,9 @@ def rollout(
 
     # 6. Verify and Combine Scores
     returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
+    verifier_returns = torch.zeros(num_rollouts, 1, dtype=torch.float)
+
+
     t_verify = 0
     
 
@@ -187,9 +178,11 @@ def rollout(
 
         returns[i] = hybrid_reward
 
+        verifier_returns[i] = verl_score
+
     # print(f"[Timing] Gen: {gen_time:.2f}s | Batch RM: {rm_time:.3f}s | Verifier: {t_verify:.3f}s")
     
-    return sequence_ids, returns.to(sequence_ids.device), action_mask, completions
+    return sequence_ids, returns.to(sequence_ids.device), action_mask, completions, verifier_returns
 
 @torch.no_grad()
 def rollout_batch(
@@ -214,6 +207,7 @@ def rollout_batch(
 
     B = len(tasks)                         # batch_size (# of questions)
     K = num_rollouts                       # group_size
+    total = B * K                          # total completions
 
     # 1. Build chat prompts for all tasks
     chat_prompts = [
@@ -267,6 +261,7 @@ def rollout_batch(
 
     # 7. Compute rewards (still per question)
     all_returns = []
+    all_verifier_returns = []
     idx = 0
 
     for task, oracle in zip(tasks, oracle_answers):
@@ -281,24 +276,31 @@ def rollout_batch(
         sigma_bar = torch.stack(SIGMA_BAR_LIST).mean()
 
         returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
+        verifier_returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
+
 
         for i, comp in enumerate(each_completions):
             verl_score = math_verifier.verify(task, comp, oracle)["reward"]
 
-            r_hat = combine_hybrid_score(
-                verl_score, rm_scores[i], min_rm, max_rm, eps, alpha, beta
-            )
+            r_hat = tanh_combine_reward(verl_score, rm_scores[i])
 
             hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
             returns[i] = hybrid
 
+            verifier_returns[i] = verl_score
+
+
         all_returns.append(returns)
+        all_verifier_returns.append(verifier_returns)
+
         idx += K
 
     # stack into [B*K, 1]
     all_returns = torch.cat(all_returns, dim=0)
+    all_verifier_returns = torch.cat(all_verifier_returns, dim=0)
 
-    return generated, all_returns, action_mask, completions
+
+    return generated, all_returns, action_mask, completions, all_verifier_returns
 
 
 
@@ -324,80 +326,40 @@ def main():
         "seed": 42,
         "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "checkpoint_path": Path("./output"),
-        "train_batch_size": 16,
+        "train_batch_size": 8,
         "lr": 1e-5,
         "group_size": 8,
-        "rollouts_per_step": 16,
+        "rollouts_per_step": 8,
         "max_norm": 1.0,
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
         "enable_profiling": True,
-        # ---- LoRA Configuration ----
-        "use_lora": True,  # Enable LoRA for parameter-efficient training
-        "lora_r": 16,  # Low-rank dimension
-        "lora_alpha": 32,  # Scaling parameter (typically 2*r)
-        "lora_dropout": 0.05,
-        "lora_target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],  # Attention layers to adapt
         "max_length": 200
     }
     
     init_rng(config["seed"])
     device = torch.device("cuda", 0)
-    wandb.init(
-        project="tiny-grpo",
-        name=f"tinyllama-lora-{epochs}ep",
-        config=config,
-    )
+    wandb.init(mode="disabled") # Set to "online" for tracking
 
     # --- Load Models ---
     print("Loading Models...")
-    # Reference model: NO LoRA (frozen for KL divergence computation)
     ref_model, _ = load_model(config["model_name"], device_map=device)
+    model, tokenizer = load_model(config["model_name"], device_map=device)
     ref_model.eval()
     
-    # Policy model: WITH LoRA (only these parameters will be trained)
-    lora_config = None
-    if config["use_lora"]:
-        lora_config = LoraConfig(
-            r=config["lora_r"],
-            lora_alpha=config["lora_alpha"],
-            target_modules=config["lora_target_modules"],
-            lora_dropout=config["lora_dropout"],
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
-    
-    model, tokenizer = load_model(
-        config["model_name"],
-        device_map=device,
-        use_lora=config["use_lora"],
-        lora_config=lora_config
-    )
-    
-    # Show parameter efficiency when using LoRA
-    if config["use_lora"]:
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"\n🎯 LoRA enabled:")
-        print(f"  Trainable params: {trainable_params:,}")
-        print(f"  Total params: {total_params:,}")
-        print(f"  Trainable percentage: {100 * trainable_params / total_params:.2f}%\n")
-    
-    optimizer = optim.Adam(model.parameters(), lr=config["lr"])  # Automatically only trains LoRA parameters
+    optimizer = optim.Adam(model.parameters(), lr=config["lr"])
     reward_model = AceRewardModel()
     math_verifier = MathVerifier(method="flexible", correct_reward=1.0, format_reward=0.0)
 
     # --- Data Loading ---
-    # Use subset per epoch for more granular logging (500 prompts × 100 epochs covers dataset ~7x)
+    # adjust max_rows for training size
     prompts = read_prompts("data/train.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=500)
-    print(f"Loaded {len(prompts)} prompts per epoch")
+    print(f"Loaded {len(prompts)} prompts")
     prompt_loader = DataLoader(prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=True)
     
-    # Use ~200 test samples for evaluation
-    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=200)
-    print(f"Loaded {len(test_prompts)} test prompts")
+    test_prompts = read_prompts("data/test.jsonl", predicate=lambda x: len(x["question"]) < 512, max_rows=10)
+    print(f"Loaded {len(test_prompts)} prompts")
     test_prompt_loader = DataLoader(test_prompts, batch_size=config["rollouts_per_step"], shuffle=True, drop_last=False)
-    
 
     replay_buffer = ReplayBuffer()
     objective = GRPOLoss(clip_eps=0.2, kl_weight=0.01)
@@ -408,61 +370,39 @@ def main():
     max_rm = float('-inf')
 
     temperature = 1.0
-    warmup_prompts = prompts[:min(50, len(prompts))]  # More warmup samples for better RM bounds
+
     
     with torch.no_grad():
-        # Batch generate all completions
-        questions = [p["question"] for p in warmup_prompts]
-        answers = [p["answer"] for p in warmup_prompts]
-        
-        # Build chat prompts for all questions
-        chat_prompts = [
-            tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": q},
-                ],
-                tokenize=False,
-                add_generation_prompt=True,
+        for i, prompt in enumerate(prompts[:min(20, len(prompts))]):
+            q = prompt["question"]
+            a = prompt["answer"]
+            # Generate a single completion for RM calibration
+            chat_messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q},
+            ]
+            chat_prompt = tokenizer.apply_chat_template(
+                chat_messages, tokenize=False, add_generation_prompt=True
             )
-            for q in questions
-        ]
-        
-        # Tokenize and generate in batch
-        model_inputs = tokenizer(chat_prompts, return_tensors="pt", padding=True).to(device)
-        gen_config = GenerationConfig(
-            do_sample=True,
-            temperature=temperature,
-            max_new_tokens=config["max_length"],
-            pad_token_id=tokenizer.eos_token_id,
-        )
-        outputs = model.generate(**model_inputs, generation_config=gen_config)
-        
-        # Decode all completions
-        completions = [
-            tokenizer.decode(output[model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-            for output in outputs
-        ]
-        
-        # Batch compute rewards for all completions and answers
-        # Since completion and answer share the same prompt, we can batch them together
-        all_rm_scores = []
-        for q, comp, ans in zip(questions, completions, answers):
+            model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
+            output = model.generate(**model_inputs, max_length=config["max_length"], temperature=temperature, do_sample=True)
+            completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            
             try:
-                # Batch compute reward for both completion and answer together (same prompt)
-                rm_scores = reward_model.compute_batch_reward(q, [comp, ans])
-                
-                rm_score = rm_scores[0]
-                answer_score = rm_scores[1]
-                
-                all_rm_scores.extend([rm_score, answer_score])
-                
+                rm_outputs = reward_model.compute_reward(q, completion)
+                from_answer = reward_model.compute_reward(q, a)
+
+                rm_score = rm_outputs[0]
+                answer_score = from_answer[0]
+
+                min_rm = min(min_rm, rm_score)
+                min_rm = min(min_rm, answer_score)
+
+                max_rm = max(max_rm, rm_score)
+                max_rm = max(max_rm, answer_score)
+
             except Exception as e:
-                print(f"Warning during warmup for question: {e}")
-        
-        if all_rm_scores:
-            min_rm = min(all_rm_scores)
-            max_rm = max(all_rm_scores)
+                print(f"Warning during warmup: {e}")
     
     print(f"RM bounds: min={min_rm:.4f}, max={max_rm:.4f}")
     
@@ -476,12 +416,20 @@ def main():
     train_rewards = torch.zeros(epochs)
     train_rewards_std = torch.zeros(epochs)
 
+    train_verifier = torch.zeros(epochs)
+
     test_rewards = torch.zeros(epochs)
     test_rewards_std = torch.zeros(epochs)
 
+    test_verifier = torch.zeros(epochs)
+
+    curr_step_losses_epoch = torch.zeros(epochs)
+    curr_step_KL_epoch = torch.zeros(epochs)
+
     for e in range(epochs):
 
-        reward_prompt = []
+        reward_prompt = torch.zeros(len(prompts))
+        verifer_reward_prompt = torch.zeros(len(prompts))
         # --- Training Loop ---
         for k, batch in enumerate(prompt_loader):
             # print(f"\n=== Step {k} ===")
@@ -495,7 +443,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -529,7 +477,9 @@ def main():
                     kl=approx_kl_divergence(log_probs, log_probs_ref, action_mask),
                 )
 
-            replay_buffer.append(exp)
+            replay_buffer.clear()
+            replay_buffer.append(exp.to("cpu"))
+
 
             # 3. Optimization Phase
             train_loader = DataLoader(replay_buffer, batch_size=config["train_batch_size"], shuffle=True, collate_fn=join_experience_batch)
@@ -538,7 +488,7 @@ def main():
             curr_step_losses = []
             curr_step_KLs = []
 
-            optim_per_step = 4
+            optim_per_step = 1
 
             # optimization steps per prompt
             for _ in range(optim_per_step): 
@@ -558,13 +508,21 @@ def main():
                         # print(f"Loss: {loss.item():.4f}, KL: {kl.item():.4f}")
                         curr_step_losses.append(loss.item())
                         curr_step_KLs.append(kl.item())
+                    
+                        if _ == 0:
+                            curr_step_losses_epoch[e] = loss.item()
+                            curr_step_KL_epoch[e] = kl.item()
 
                     else:
                         print("Skipping non-finite loss")
 
-            reward_prompt.append(returns.mean().item())
+            reward_prompt[k] = returns.mean()
+            verifer_reward_prompt[k] = verifer_returns.max()
 
-        test_reward_prompt = []
+
+
+        test_reward_prompt = torch.zeros(len(test_prompts))
+        test_verifier_reward_prompt = torch.zeros(len(test_prompts))
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
@@ -575,7 +533,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -592,37 +550,41 @@ def main():
                 device=device,
             )
 
-            test_reward_prompt.append(returns.mean().item())
+
+            test_reward_prompt[k] = returns.mean()
+            test_verifier_reward_prompt[k] = verifer_returns.max()
+
+        train_rewards[e] = reward_prompt.mean()
+        train_rewards_std[e] = reward_prompt.std()
+        train_verifier[e] = verifer_reward_prompt.mean()
+
+        test_rewards[e] = test_reward_prompt.mean()
+        test_rewards_std[e] = test_reward_prompt.std()
+        test_verifier[e] = test_verifier_reward_prompt.mean()
 
 
+        print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, train_verifier: {train_verifier[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, test_verifier: {test_verifier[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
-        train_rewards[e] = torch.tensor(reward_prompt).mean() if reward_prompt else 0.0
-        train_rewards_std[e] = torch.tensor(reward_prompt).std() if reward_prompt else 0.0
-
-        test_rewards[e] = torch.tensor(test_reward_prompt).mean() if test_reward_prompt else 0.0
-        test_rewards_std[e] = torch.tensor(test_reward_prompt).std() if test_reward_prompt else 0.0
-
-        avg_loss = sum(curr_step_losses) / len(curr_step_losses) if curr_step_losses else 0.0
-        avg_kl = sum(curr_step_KLs) / len(curr_step_KLs) if curr_step_KLs else 0.0
-        
-        # Log epoch metrics to wandb
-        wandb.log({
-            "epoch": e,
-            "train_reward": train_rewards[e].item(),
-            "train_reward_std": train_rewards_std[e].item(),
-            "test_reward": test_rewards[e].item(),
-            "test_reward_std": test_rewards_std[e].item(),
-            "epoch_avg_loss": avg_loss,
-            "epoch_avg_kl": avg_kl,
-        })
-        
-        print(f'Epoch {e}, Train Reward: {train_rewards[e]:.4f} ± {train_rewards_std[e]:.4f}, Test Reward: {test_rewards[e]:.4f} ± {test_rewards_std[e]:.4f}, Loss: {avg_loss:.4f}, KL: {avg_kl:.4f}')
+        # 4. Checkpointing
+        if (e + 1) % 20 == 0:
+            model.save_pretrained(config["checkpoint_path"] / f"step_{e}")
 
 
-        # 4. Checkpointing - save every 10 epochs
-        if (e + 1) % 10 == 0:
-            model.save_pretrained(config["checkpoint_path"] / f"epoch_{e}")
+    History = {
+        "train_rewards": train_rewards,
+        "train_rewards_std": train_rewards_std,
+        "train_verifier": train_verifier,
+        "test_rewards": test_rewards,
+        "test_rewards_std": test_rewards_std,
+        "train_verifier": train_verifier,
+        "train_verifier": train_verifier,
+        "test_verifier": test_verifier,
+        "curr_step_losses": curr_step_losses_epoch,
+        "KL_Divergence": curr_step_KL_epoch
+    }
 
+
+    torch.save(History, "Reward_history.pt")
 
 
 
