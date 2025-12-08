@@ -16,7 +16,8 @@ def approx_kl_divergence(
 
     log_ratio = log_probs_ref.float() - log_probs.float()
     if action_mask is not None:
-        log_ratio = log_ratio * action_mask
+        # Convert bool mask to float for proper multiplication
+        log_ratio = log_ratio * action_mask.float()
 
     return log_ratio.exp() - log_ratio - 1
 
@@ -25,10 +26,16 @@ def masked_mean(
     tensor: torch.Tensor,
     mask: Optional[torch.Tensor],
     dim: int = None,
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     if mask is None:
         return tensor.mean(axis=dim)
-    return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim)
+    # Convert bool mask to float for proper multiplication
+    mask = mask.float()
+    mask_sum = mask.sum(axis=dim)
+    # Avoid division by zero - clamp to minimum of eps
+    mask_sum = mask_sum.clamp(min=eps)
+    return (tensor * mask).sum(axis=dim) / mask_sum
 
 
 class GRPOLoss(nn.Module):
@@ -62,4 +69,5 @@ class GRPOLoss(nn.Module):
         loss = -torch.min(surr1, surr2) + self.kl_weight * kl
 
         loss = masked_mean(loss, action_mask, dim=-1).mean()
-        return loss, kl.mean()
+        kl_masked = masked_mean(kl, action_mask, dim=-1).mean()
+        return loss, kl_masked

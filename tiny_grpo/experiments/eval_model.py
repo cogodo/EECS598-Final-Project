@@ -13,7 +13,8 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 from reward_model import AceRewardModel
 from math_verifier import MathVerifier
 
-SYSTEM_PROMPT = "You are a helpful math assistant. Solve the given problem step by step and provide your final answer wrapped in <answer> tags, like this: <answer>your answer here</answer>"
+SYSTEM_PROMPT = """You are a helpful math assistant. Please solve the problem step by step, showing your reasoning clearly. 
+Once you have solved the problem, provide your final numerical answer wrapped in <answer> tags, like this: <answer>number</answer>"""
 
 def load_model(checkpoint_path: str, device: str = "cuda", base_model: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"):
     """Load model and tokenizer from checkpoint
@@ -55,6 +56,7 @@ def load_model(checkpoint_path: str, device: str = "cuda", base_model: str = "Ti
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
 
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # Critical for generation with padding
     model.config.pad_token_id = tokenizer.eos_token_id
     model.eval()
 
@@ -74,7 +76,7 @@ def generate_responses(
     tokenizer: AutoTokenizer,
     questions: List[str],
     num_samples: int = 1,
-    max_length: int = 256,
+    max_new_tokens: int = 256,
     temperature: float = 1.0,
     top_p: float = 1.0,
     batch_size: int = 4,
@@ -106,7 +108,7 @@ def generate_responses(
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=max_length
+            max_length=2048,  # Allow long prompts
         ).to(model.device)
 
         # Generate
@@ -114,7 +116,7 @@ def generate_responses(
             do_sample=True,
             top_p=top_p,
             temperature=temperature,
-            max_length=max_length,
+            max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -140,18 +142,30 @@ def generate_responses(
 
 def compute_pass_at_k(n: int, c: int, k: int) -> float:
     """
-    Compute pass@k metric
-    n: total number of samples
-    c: number of correct samples
-    k: k in pass@k
+    Compute pass@k metric using standard formula.
+    
+    pass@k = 1 - C(n-c, k) / C(n, k)
+    
+    Where C(n,k) is "n choose k" (binomial coefficient).
+    This computes the probability that at least one of k random samples is correct.
+    
+    Args:
+        n: total number of samples
+        c: number of correct samples  
+        k: k in pass@k
     """
     if n - c < k:
         return 1.0
-    return 1.0 - (
-        sum(1.0 / (n - i) for i in range(k))
-        / sum(1.0 / (n - i) for i in range(n - c, n))
-        if c < n else 1.0
-    )
+    if c == 0:
+        return 0.0
+    
+    # Compute using the product formula to avoid large factorials
+    # C(n-c, k) / C(n, k) = prod_{i=0}^{k-1} (n-c-i) / (n-i)
+    result = 1.0
+    for i in range(k):
+        result *= (n - c - i) / (n - i)
+    
+    return 1.0 - result
 
 def evaluate(
     model: AutoModelForCausalLM,
@@ -179,6 +193,7 @@ def evaluate(
     all_responses = generate_responses(
         model, tokenizer, questions,
         num_samples=num_samples,
+        max_new_tokens=256,
         temperature=1.0,
         top_p=1.0
     )
@@ -278,10 +293,12 @@ def main():
         default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         help="Base model name (needed for LoRA checkpoints)"
     )
+    # Default test data path relative to this script's location
+    default_test_path = Path(__file__).parent.parent / "data" / "test.jsonl"
     parser.add_argument(
         "--test_data",
         type=str,
-        default="data/test_gsm8k.jsonl",
+        default=str(default_test_path),
         help="Path to test data (JSONL format)"
     )
     parser.add_argument(
@@ -314,10 +331,8 @@ def main():
     test_path = Path(args.test_data)
     if not test_path.exists():
         print(f"Error: Test data not found at {test_path}")
-        print("\nTo download GSM8K test set, run:")
-        print("  python -c \"from datasets import load_dataset; ds = load_dataset('openai/gsm8k', 'main'); ds['test'].to_json('data/test_gsm8k.jsonl')\"")
-        print("\nOr use a portion of train data for quick evaluation:")
-        print(f"  python {__file__} --checkpoint {args.checkpoint} --test_data data/train_gsm8k.jsonl --max_questions 100")
+        print("\nExpected test data at: tiny_grpo/data/test.jsonl")
+        print("Make sure you're running from the project root or provide --test_data path")
         return
 
     # Load model

@@ -627,7 +627,27 @@ def main():
 
             test_reward_prompt.append(returns.mean().item())
 
-
+        # --- Example Rollout Print ---
+        # Show one example from the last test batch
+        if tasks and completions:
+            example_idx = 0  # First completion for first question in last batch
+            example_q = tasks[0][:200] + "..." if len(tasks[0]) > 200 else tasks[0]
+            example_completion = completions[example_idx][:500] + "..." if len(completions[example_idx]) > 500 else completions[example_idx]
+            example_oracle = oracle_answers[0]
+            example_reward = returns[example_idx].item()
+            
+            # Check if answer is correct
+            verify_result = math_verifier.verify(tasks[0], completions[example_idx], example_oracle)
+            is_correct = "✅ CORRECT" if verify_result["reward"] == 1.0 else "❌ INCORRECT"
+            
+            print(f"\n{'='*60}")
+            print(f"📝 EXAMPLE ROLLOUT (Epoch {e}) {is_correct}")
+            print(f"{'='*60}")
+            print(f"Question: {example_q}")
+            print(f"\nModel Response:\n{example_completion}")
+            print(f"\nOracle Answer: {example_oracle}")
+            print(f"Reward: {example_reward:.4f}")
+            print(f"{'='*60}\n")
 
         train_rewards[e] = torch.tensor(reward_prompt).mean() if reward_prompt else 0.0
         train_rewards_std[e] = torch.tensor(reward_prompt).std() if reward_prompt else 0.0
