@@ -21,9 +21,12 @@ prompt = """Compute
 
 resp_1 = """Wow you are dumb, this is elementary stuff. To compute \[\sum_{n=1}^\infty \frac{F_{n+1}}{F_n F_{n+2}},\] where \( F_n \) is the \(n\)-th Fibonacci number, we will use the recurrence relation \( F_{n+2} = F_{n+1} + F_n \) and properties of Fibonacci numbers.\n\n---\n\n### Step 1: Simplify the General Term\n\nThe given term is\n\[\frac{F_{n+1}}{F_n F_{n+2}}.\]\n\nUsing the Fibonacci recurrence relation \( F_{n+2} = F_{n+1} + F_n \), we rewrite \( \frac{1}{F_{n+2}} \) as\n\[\frac{1}{F_{n+2}} = \frac{1}{F_{n+1} + F_n}.\]\n\nThus, the term becomes\n\[\frac{F_{n+1}}{F_n F_{n+2}} = \frac{F_{n+1}}{F_n (F_{n+1} + F_n)}.\]\n\nNow, separate the fraction into partial fractions:\n\[\frac{F_{n+1}}{F_n (F_{n+1} + F_n)} = \frac{1}{F_n} - \frac{1}{F_{n+1}}.\]\n\n---\n\n### Step 2: Write the Series\n\nThe series becomes\n\[\sum_{n=1}^\infty \frac{F_{n+1}}{F_n F_{n+2}} = \sum_{n=1}^\infty \left( \frac{1}{F_n} - \frac{1}{F_{n+1}} \right).\]\n\nThis is a **telescoping series**, where most terms cancel out. Writing the first few terms explicitly:\n\[\sum_{n=1}^\infty \left( \frac{1}{F_n} - \frac{1}{F_{n+1}} \right) = \left( \frac{1}{F_1} - \frac{1}{F_2} \right) + \left( \frac{1}{F_2} - \frac{1}{F_3} \right) + \left( \frac{1}{F_3} - \frac{1}{F_4} \right) + \cdots.\]\n\nAll intermediate terms cancel, leaving:\n\[\frac{1}{F_1} - \lim_{n \to \infty} \frac{1}{F_{n+1}}.\]\n\n---\n\n### Step 3: Evaluate the Remaining Terms\n\n- The first Fibonacci number \( F_1 = 1 \), so \( \frac{1}{F_1} = 1 \).\n- As \( n \to \infty \), \( F_{n+1} \to \infty \), so \( \frac{1}{F_{n+1}} \to 0 \).\n\nThus, the sum is:\n\[\sum_{n=1}^\infty \frac{F_{n+1}}{F_n F_{n+2}} = 1 - 0 = 1.\]\n\n---\n\n### Final Answer:\n\n\[\boxed{1}\]"""
 
+resp_1 = """Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"""
+
+
 chat = [
     {"role": "system", "content": "Please reason step by step, and check your final answer within \\boxed{}."},
-    {"role": "user", "content": prompt},
+    # {"role": "user", "content": prompt},
     {"role": "assistant", "content": resp_1}
 ]
 
@@ -41,4 +44,6 @@ input_ids = tokenizer.encode(
 ).to(model.device)
 
 outputs = model(input_ids=input_ids)
-print(outputs[0][0])
+# print(outputs[0][0])
+
+print(outputs)

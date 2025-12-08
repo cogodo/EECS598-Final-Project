@@ -55,7 +55,7 @@ messages = []
 
 prompts = []
 
-for i in range(3):
+for i in range(1):
     messages.append({
         "role": "system",
         "content": math_df["question"].iloc[i],
