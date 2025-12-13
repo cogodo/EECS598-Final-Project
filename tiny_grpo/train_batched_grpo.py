@@ -301,7 +301,6 @@ def rollout_batch(
 
 
 
-
         all_returns.append(returns)
         all_verifier_returns.append(verifier_returns)
 
