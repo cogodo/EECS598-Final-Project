@@ -293,6 +293,9 @@ def rollout_batch(
             returns[i] = rm_scores[i]
             verifier_returns[i] = verl_score
 
+            returns[i] = verl_score
+
+
         all_returns.append(returns)
         all_verifier_returns.append(verifier_returns)
 
