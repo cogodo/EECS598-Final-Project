@@ -264,8 +264,11 @@ def rollout_batch(
     all_verifier_returns = []
     idx = 0
 
+    tokens_length = []
+
     for task, oracle in zip(tasks, oracle_answers):
         each_completions = completions[idx: idx + K]
+
 
         # reward model
         rm_scores = reward_model.compute_batch_reward(task, each_completions)
@@ -287,13 +290,15 @@ def rollout_batch(
             )
 
             hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
-            returns[i] = hybrid
+            # returns[i] = hybrid
 
+            returns[i] = rm_scores[i]
             verifier_returns[i] = verl_score
 
 
         all_returns.append(returns)
         all_verifier_returns.append(verifier_returns)
+        tokens_length.append(len(each_completions))
 
         idx += K
 
@@ -301,8 +306,7 @@ def rollout_batch(
     all_returns = torch.cat(all_returns, dim=0)
     all_verifier_returns = torch.cat(all_verifier_returns, dim=0)
 
-
-    return generated, all_returns, action_mask, completions, all_verifier_returns
+    return generated, all_returns, action_mask, completions, all_verifier_returns, tokens_length
 
 
 
@@ -428,10 +432,16 @@ def main():
     curr_step_losses_epoch = torch.zeros(epochs)
     curr_step_KL_epoch = torch.zeros(epochs)
 
+    average_tokens = torch.zeros(epochs)
+
+
     for e in range(epochs):
 
         reward_prompt = torch.zeros(len(prompts))
         verifer_reward_prompt = torch.zeros(len(prompts))
+        average_token_prompt = torch.zeros(len(prompts))
+
+
         # --- Training Loop ---
         for k, batch in enumerate(prompt_loader):
             # print(f"\n=== Step {k} ===")
@@ -445,7 +455,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns, tokens_length = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -520,6 +530,8 @@ def main():
 
             reward_prompt[k] = returns.mean()
             verifer_reward_prompt[k] = verifer_returns.max()
+            average_token_prompt[k] = torch.mean(tokens_length)
+
 
 
 
@@ -535,7 +547,7 @@ def main():
                 for ans in batch["answer"]
             ]
 
-            sequence_ids, returns, action_mask, completions, verifer_returns = rollout_batch(
+            sequence_ids, returns, action_mask, completions, verifer_returns, tokens_length_2 = rollout_batch(
                 model,
                 tokenizer,
                 tasks,
@@ -563,7 +575,7 @@ def main():
         test_rewards[e] = test_reward_prompt.mean()
         test_rewards_std[e] = test_reward_prompt.std()
         test_verifier[e] = test_verifier_reward_prompt.mean()
-
+        average_tokens[e] = average_token_prompt.mean()
 
         print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, train_verifier: {train_verifier[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, test_verifier: {test_verifier[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
@@ -582,7 +594,8 @@ def main():
         "train_verifier": train_verifier,
         "test_verifier": test_verifier,
         "curr_step_losses": curr_step_losses_epoch,
-        "KL_Divergence": curr_step_KL_epoch
+        "KL_Divergence": curr_step_KL_epoch,
+        "KL_Divergence": average_tokens
     }
 
 
