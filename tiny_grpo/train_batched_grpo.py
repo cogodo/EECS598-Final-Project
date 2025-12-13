@@ -530,7 +530,7 @@ def main():
 
             reward_prompt[k] = returns.mean()
             verifer_reward_prompt[k] = verifer_returns.max()
-            average_token_prompt[k] = torch.mean(tokens_length)
+            average_token_prompt[k] = torch.tensor(tokens_length, dtype=torch.float).mean()
 
 
 
