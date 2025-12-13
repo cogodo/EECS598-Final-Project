@@ -114,7 +114,7 @@ def generate_responses(
             do_sample=True,
             top_p=top_p,
             temperature=temperature,
-            max_length=max_length,
+            max_new_tokens=max_length,  # Use max_new_tokens, not max_length (total seq len)
             pad_token_id=tokenizer.eos_token_id,
         )
 
