@@ -272,8 +272,8 @@ def rollout_batch(
     for task, oracle in zip(tasks, oracle_answers):
 
         # slice ONCE using same idx
-        each_lengths = gen_lengths[idx: idx + K]          # [K]
-        each_completions = completions[idx: idx + K]      # K strings
+        each_lengths = gen_lengths[idx: idx + K]
+        each_completions = completions[idx: idx + K] 
 
         tokens_length.append(each_lengths)
 
@@ -290,10 +290,16 @@ def rollout_batch(
 
         for i, comp in enumerate(each_completions):
             verl_score = math_verifier.verify(task, comp, oracle)["reward"]
-            returns[i] = rm_scores[i]
             verifier_returns[i] = verl_score
 
-            returns[i] = verl_score
+            r_hat = combine_hybrid_score(
+                verl_score, rm_scores[i], min_rm, max_rm, eps, alpha, beta
+            )
+
+            hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
+            returns[i] = hybrid
+
+
 
 
         all_returns.append(returns)
