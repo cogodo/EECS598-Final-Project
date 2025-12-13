@@ -262,13 +262,20 @@ def rollout_batch(
     # 7. Compute rewards (still per question)
     all_returns = []
     all_verifier_returns = []
-    idx = 0
+
+    prompt_len = input_ids.shape[1]
+    gen_lengths = (generated[:, prompt_len:] != tokenizer.eos_token_id).sum(dim=1)
 
     tokens_length = []
+    idx = 0
 
     for task, oracle in zip(tasks, oracle_answers):
-        each_completions = completions[idx: idx + K]
 
+        # slice ONCE using same idx
+        each_lengths = gen_lengths[idx: idx + K]          # [K]
+        each_completions = completions[idx: idx + K]      # K strings
+
+        tokens_length.append(each_lengths)
 
         # reward model
         rm_scores = reward_model.compute_batch_reward(task, each_completions)
@@ -281,30 +288,22 @@ def rollout_batch(
         returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
         verifier_returns = torch.zeros(K, 1, dtype=torch.float32, device=device)
 
-
         for i, comp in enumerate(each_completions):
             verl_score = math_verifier.verify(task, comp, oracle)["reward"]
-
-            r_hat = combine_hybrid_score(
-                verl_score, rm_scores[i], min_rm, max_rm, eps, alpha, beta
-            )
-
-            hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
-            # returns[i] = hybrid
-
             returns[i] = rm_scores[i]
             verifier_returns[i] = verl_score
 
-
         all_returns.append(returns)
         all_verifier_returns.append(verifier_returns)
-        tokens_length.append(len(each_completions))
 
         idx += K
+
 
     # stack into [B*K, 1]
     all_returns = torch.cat(all_returns, dim=0)
     all_verifier_returns = torch.cat(all_verifier_returns, dim=0)
+    tokens_length = torch.cat(tokens_length, dim=0)
+    # .append(len(each_completions))
 
     return generated, all_returns, action_mask, completions, all_verifier_returns, tokens_length
 
@@ -577,7 +576,7 @@ def main():
         test_verifier[e] = test_verifier_reward_prompt.mean()
         average_tokens[e] = average_token_prompt.mean()
 
-        print(f'Epoch: {e}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, train_verifier: {train_verifier[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, test_verifier: {test_verifier[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
+        print(f'Epoch: {e}, Token Lengths: {average_tokens[e]}, Average Train Reward: {train_rewards[e]}, Average Train STD: {train_rewards_std[e]}, train_verifier: {train_verifier[e]}, Average Test Reward: {test_rewards[e]}, Avergre Test Reward STD: {test_rewards_std[e]}, test_verifier: {test_verifier[e]}, GRPO Loss: {curr_step_losses_epoch[e]}, KL Divergence: {curr_step_KL_epoch[e]}')
 
         # 4. Checkpointing
         if (e + 1) % 20 == 0:
@@ -595,7 +594,7 @@ def main():
         "test_verifier": test_verifier,
         "curr_step_losses": curr_step_losses_epoch,
         "KL_Divergence": curr_step_KL_epoch,
-        "KL_Divergence": average_tokens
+        "Average_Tokens": average_tokens
     }
 
 
