@@ -347,7 +347,7 @@ def main():
         "alpha": 0.5, "beta": 0.5, "eps": 0.01,
         "min_rm": -7.0, "max_rm": 7.0, # Pre-calibrated bounds
         "enable_profiling": True,
-        "max_length": 200
+        "max_new_tokens": 200
     }
     
     init_rng(config["seed"])
@@ -398,7 +398,7 @@ def main():
                 chat_messages, tokenize=False, add_generation_prompt=True
             )
             model_inputs = tokenizer([chat_prompt], return_tensors="pt", padding=True).to(device)
-            output = model.generate(**model_inputs, max_length=config["max_length"], temperature=temperature, do_sample=True)
+            output = model.generate(**model_inputs, max_new_tokens=config["max_new_tokens"], temperature=temperature, do_sample=True)
             completion = tokenizer.decode(output[0, model_inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             
             try:
@@ -444,9 +444,10 @@ def main():
 
     for e in range(epochs):
 
-        reward_prompt = torch.zeros(len(prompts))
-        verifer_reward_prompt = torch.zeros(len(prompts))
-        average_token_prompt = torch.zeros(len(prompts))
+        num_batches = len(prompt_loader)
+        reward_prompt = torch.zeros(num_batches)
+        verifer_reward_prompt = torch.zeros(num_batches)
+        average_token_prompt = torch.zeros(num_batches)
 
 
         # --- Training Loop ---
@@ -475,7 +476,7 @@ def main():
                 config["alpha"],
                 config["beta"],
                 config["eps"],
-                max_new_tokens=config["max_length"],
+                max_new_tokens=config["max_new_tokens"],
                 device=device,
             )
 
@@ -542,8 +543,9 @@ def main():
 
 
 
-        test_reward_prompt = torch.zeros(len(test_prompts))
-        test_verifier_reward_prompt = torch.zeros(len(test_prompts))
+        num_test_batches = len(test_prompt_loader)
+        test_reward_prompt = torch.zeros(num_test_batches)
+        test_verifier_reward_prompt = torch.zeros(num_test_batches)
         # --- testing_loop Loop ---
         for k, batch in enumerate(test_prompt_loader):
 
@@ -567,7 +569,7 @@ def main():
                 config["alpha"],
                 config["beta"],
                 config["eps"],
-                max_new_tokens=config["max_length"],
+                max_new_tokens=config["max_new_tokens"],
                 device=device,
             )
 
