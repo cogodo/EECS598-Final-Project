@@ -297,7 +297,8 @@ def rollout_batch(
             )
 
             hybrid = get_final_reward(r_hat, sigma_bar=sigma_bar, sigma_u=sigma_u)
-            returns[i] = hybrid
+    
+            returns[i] = rm_scores[i]
 
 
 
