@@ -176,7 +176,7 @@ def rollout(
         # get final reward with variance aware reweighting
         hybrid_reward = get_final_reward(r_hat, sigma_bar=torch.stack(SIGMA_BAR_LIST).mean(), sigma_u=sigma_u)
 
-        returns[i] = verl_score
+        returns[i] = rm_scores_list[i]
 
         verifier_returns[i] = verl_score
 
